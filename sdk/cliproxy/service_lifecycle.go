@@ -72,6 +72,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 	s.configureCooldownStateStore(s.cfg)
+	s.configureRequestStatsStore(s.cfg)
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {
@@ -83,6 +84,9 @@ func (s *Service) Run(ctx context.Context) error {
 			if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
+		}
+		if errRestoreStats := s.coreManager.RestoreRequestStats(ctx); errRestoreStats != nil {
+			log.Warnf("failed to restore request statistics: %v", errRestoreStats)
 		}
 	}
 
@@ -232,6 +236,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		if ctx == nil {
 			ctx = context.Background()
+		}
+
+		// Flush request statistics before tearing down the manager so the
+		// counters accumulated since the last periodic flush are not lost.
+		if s.coreManager != nil {
+			if errFlush := s.coreManager.PersistRequestStats(ctx); errFlush != nil {
+				log.Warnf("failed to persist request statistics on shutdown: %v", errFlush)
+			}
 		}
 
 		s.homeLifecycleMu.Lock()

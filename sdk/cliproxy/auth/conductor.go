@@ -109,6 +109,7 @@ type Manager struct {
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
+	requestStats              requestStatsRuntime
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
 	hook                      Hook
