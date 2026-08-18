@@ -26,6 +26,21 @@ func matchProvider(provider string, targets []string) (string, bool) {
 	return p, false
 }
 
+// internalRuntimeAuthNames are non-credential JSON files the server persists into
+// the auth directory. They must not be treated as credentials by the watcher.
+var internalRuntimeAuthNames = map[string]bool{
+	"usage_stats.json": true,
+}
+
+// isInternalRuntimeAuthFile reports whether baseName is a server-managed runtime
+// file that shares the auth directory but is not a credential source.
+func isInternalRuntimeAuthFile(baseName string) bool {
+	if baseName == "" {
+		return false
+	}
+	return internalRuntimeAuthNames[strings.ToLower(baseName)]
+}
+
 func (w *Watcher) start(ctx context.Context) error {
 	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
 		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
@@ -72,7 +87,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON :=
+		filepath.Dir(normalizedName) == normalizedAuthDir &&
+			strings.HasSuffix(normalizedName, ".json") &&
+			!isInternalRuntimeAuthFile(filepath.Base(normalizedName)) &&
+			event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
