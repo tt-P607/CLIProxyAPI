@@ -409,6 +409,33 @@ func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {
 	return authDir, nil
 }
 
+// configureRequestStatsStore installs the request statistics store on the manager.
+func (s *Service) configureRequestStatsStore(cfg *config.Config) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	s.coreManager.SetRequestStatsStore(s.resolveRequestStatsStore(cfg))
+}
+
+// resolveRequestStatsStore builds the per-credential request statistics store.
+//
+// Unlike cooldown state this is not gated by SaveCooldownStatus: request
+// counters are always worth restoring across restarts when running locally.
+func (s *Service) resolveRequestStatsStore(cfg *config.Config) coreauth.RequestStatsStore {
+	if cfg == nil || cfg.Home.Enabled {
+		return nil
+	}
+	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
+	if errResolve != nil {
+		log.Warnf("failed to resolve request stats directory: %v", errResolve)
+		return nil
+	}
+	if authDir == "" {
+		return nil
+	}
+	return coreauth.NewFileRequestStatsStoreWithAuthDir(authDir, authDir)
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false

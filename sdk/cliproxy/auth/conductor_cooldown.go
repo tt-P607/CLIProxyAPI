@@ -729,6 +729,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			auth.Failed++
 		}
+		m.markRequestStatsDirty()
 
 		if result.Success {
 			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
@@ -984,6 +985,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 		} else {
 			auth.Failed++
 		}
+		m.markRequestStatsDirty()
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}

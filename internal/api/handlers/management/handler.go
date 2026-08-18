@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -48,6 +49,7 @@ type Handler struct {
 	failedAttempts          map[string]*attemptInfo // keyed by client IP
 	authManager             *coreauth.Manager
 	tokenStore              coreauth.Store
+	usageStats              *usage.RequestStatistics
 	localPassword           string
 	allowRemoteOverride     bool
 	envSecret               string
@@ -137,6 +139,16 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	}
 	h.mu.Lock()
 	h.authManager = manager
+	h.mu.Unlock()
+}
+
+// SetUsageStatistics replaces the usage statistics reference used by management endpoints.
+func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.usageStats = stats
 	h.mu.Unlock()
 }
 
