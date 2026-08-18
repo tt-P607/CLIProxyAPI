@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -70,13 +71,24 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	})
 }
 
-// ResetAllStatistics resets the in-memory usage statistics and synchronizes to disk.
+// ResetAllStatistics resets usage statistics and per-auth request health state.
 func (h *Handler) ResetAllStatistics(c *gin.Context) {
-	if h != nil && h.usageStats != nil {
+	if h.usageStats != nil {
 		if err := usage.ResetStats(h.usageStats); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset usage statistics"})
 			return
 		}
 	}
+
+	h.mu.Lock()
+	manager := h.authManager
+	h.mu.Unlock()
+	if manager != nil {
+		if err := manager.ResetRequestStats(context.Background()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset credential health state"})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "all statistics reset successfully"})
 }
