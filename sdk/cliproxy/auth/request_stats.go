@@ -213,17 +213,6 @@ func (a *Auth) hasHealthState() bool {
 	return false
 }
 
-func cloneModelStates(states map[string]*ModelState) map[string]*ModelState {
-	if len(states) == 0 {
-		return nil
-	}
-	cloned := make(map[string]*ModelState, len(states))
-	for model, state := range states {
-		cloned[model] = state.Clone()
-	}
-	return cloned
-}
-
 // ResetRequestStats clears counters for every auth and drops persisted state.
 func (m *Manager) ResetRequestStats(ctx context.Context) error {
 	if m == nil {
