@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -39,6 +40,7 @@ const (
 	claudeCodeBeta               = "claude-code-20250219"
 	claudeContext1MBeta          = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta      = "mid-conversation-system-2026-04-07"
+	claudeAdvisorToolBeta        = "advisor-tool-2026-03-01"
 	claudeAdvancedToolUseBeta    = "advanced-tool-use-2025-11-20"
 	claudeEffortBeta             = "effort-2025-11-24"
 	claudeServerSideFallbackBeta = "server-side-fallback-2026-06-01"
@@ -91,13 +93,14 @@ var claudeCodeTrailingBetas = []string{
 //	 7 context-management-2025-06-27
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
-//	10 advanced-tool-use-2025-11-20       requests with tools
-//	11 effort-2025-11-24
-//	12 server-side-fallback-2026-06-01
-//	13 fallback-credit-2026-06-01
-//	14 fast-mode-2026-02-01               speed:fast requests only
-//	15 extended-cache-ttl-2025-04-11      OAuth credentials only
-//	16 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	10 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
+//	11 advanced-tool-use-2025-11-20       requests with tools
+//	12 effort-2025-11-24
+//	13 server-side-fallback-2026-06-01
+//	14 fallback-credit-2026-06-01
+//	15 fast-mode-2026-02-01               speed:fast requests only
+//	16 extended-cache-ttl-2025-04-11      OAuth credentials only
+//	17 cache-diagnosis-2026-04-07         requests with diagnostics only
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
@@ -119,6 +122,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if !claudeUsesLegacySystemReminder(body) {
 		betas = append(betas, claudeMidConvSystemBeta)
+	}
+	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
+		betas = append(betas, claudeAdvisorToolBeta)
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		betas = append(betas, claudeAdvancedToolUseBeta)
@@ -142,6 +148,22 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		betas = append(betas, claudeCacheDiagnosisBeta)
 	}
 	return strings.Join(betas, ",")
+}
+
+// claudeBodyHasAdvisorTool reports whether the request body declares an
+// advisor server tool.
+func claudeBodyHasAdvisorTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if strings.HasPrefix(toolType, "advisor_") {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeThinkingDisplaySet reports whether the request carries a thinking.display
@@ -250,6 +272,41 @@ func withClaudeOAuthCredentialBetas(betas string) string {
 	if !seen[claudeExtendedCacheTTLBeta] {
 		parts = append(parts, claudeExtendedCacheTTLBeta)
 	}
+	return strings.Join(parts, ",")
+}
+
+// withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
+// the body declares an advisor server tool, placed at the observed wire position
+// before advanced-tool-use-2025-11-20 or effort-2025-11-24.
+func withClaudeAdvisorToolBeta(betas string) string {
+	if strings.TrimSpace(betas) == "" {
+		return claudeAdvisorToolBeta
+	}
+	parts := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, beta := range strings.Split(betas, ",") {
+		if beta = strings.TrimSpace(beta); beta != "" && beta != claudeAdvisorToolBeta && !seen[beta] {
+			parts = append(parts, beta)
+			seen[beta] = true
+		}
+	}
+	insertAt := len(parts)
+	for index, beta := range parts {
+		if beta == claudeAdvancedToolUseBeta ||
+			beta == claudeEffortBeta ||
+			beta == claudeServerSideFallbackBeta ||
+			beta == claudeFallbackCreditBeta ||
+			beta == claudeStructuredOutputsBeta ||
+			beta == claudeFastModeBeta ||
+			beta == claudeExtendedCacheTTLBeta ||
+			beta == claudeCacheDiagnosisBeta {
+			insertAt = index
+			break
+		}
+	}
+	parts = append(parts, "")
+	copy(parts[insertAt+1:], parts[insertAt:])
+	parts[insertAt] = claudeAdvisorToolBeta
 	return strings.Join(parts, ",")
 }
 
@@ -610,8 +667,14 @@ func isZlibHeader(header []byte) bool {
 // single authority for every decision that has to agree with the OAuth beta
 // profile, including the extended-cache-ttl beta and the matching body cache ttl.
 func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
+	if isClaudeOAuthToken(apiKey) {
+		return true
+	}
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		return false
+	}
 	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	return isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+	return !hasAPIKeyAttr
 }
 
 func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
@@ -624,7 +687,10 @@ func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
 			lowerName != "x-app" && lowerName != "x-client-request-id" &&
 			!strings.HasPrefix(lowerName, "anthropic-") &&
 			!strings.HasPrefix(lowerName, "x-stainless-") &&
-			!strings.HasPrefix(lowerName, "x-claude-code-") {
+			!strings.HasPrefix(lowerName, "x-claude-code-") &&
+			!strings.HasPrefix(lowerName, "x-claude-remote-") &&
+			lowerName != "x-client-app" &&
+			lowerName != "x-anthropic-additional-protection" {
 			continue
 		}
 		dst.Del(name)
@@ -689,11 +755,17 @@ func applyClaudeHeadersWithNativeProfile(
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
-	if isAnthropicBase && useAPIKey {
-		r.Header.Del("Authorization")
-		r.Header.Set("x-api-key", apiKey)
+	if strings.TrimSpace(apiKey) != "" {
+		if isAnthropicBase && useAPIKey {
+			r.Header.Del("Authorization")
+			r.Header.Set("x-api-key", apiKey)
+		} else {
+			r.Header.Del("x-api-key")
+			r.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	} else {
-		r.Header.Set("Authorization", "Bearer "+apiKey)
+		r.Header.Del("Authorization")
+		r.Header.Del("x-api-key")
 	}
 	r.Header.Set("Content-Type", "application/json")
 
@@ -714,15 +786,24 @@ func applyClaudeHeadersWithNativeProfile(
 
 	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
+	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
+
 	baseBetas := incomingBetas
 	if !preserveCallerFingerprint {
-		baseBetas = claudeCodeCLIBetas(body, claudeRequestedBetas(incomingBetas, extraBetas), useOAuthBetas)
+		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas)
 		if countTokens {
 			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
+			if advisorNeeded {
+				baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+			}
 		}
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
+		if advisorNeeded {
+			baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+		}
 		// Measured Haiku helper requests already carry the exact credential
 		// beta profile and intentionally omit extended-cache-ttl.
 		if useOAuthBetas && !helperProfile {
@@ -732,6 +813,9 @@ func applyClaudeHeadersWithNativeProfile(
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas)
 			}
 		}
+	}
+	if preserveCallerFingerprint && advisorNeeded {
+		baseBetas = withClaudeAdvisorToolBeta(baseBetas)
 	}
 	existingSet := make(map[string]bool)
 	for _, beta := range strings.Split(baseBetas, ",") {
@@ -805,7 +889,7 @@ func applyClaudeHeadersWithNativeProfile(
 		if auth != nil {
 			attrs = auth.Attributes
 		}
-		util.ApplyCustomHeadersFromAttrs(r, attrs)
+		util.ApplyCustomHeadersFromAttrs(r, attrs, incomingHeaders)
 		// Scope the custom-header escape hatch exactly like the CLI path below, which
 		// claws overrides back on api.anthropic.com (an operator Anthropic-Beta reaches
 		// a first-party API that rejects unknown values) and on any streaming request
@@ -880,6 +964,19 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
 	}
+	// Preserve native Claude Code subagent and environment headers when present in the incoming request.
+	for _, hdr := range []string{
+		"X-Claude-Code-Agent-Id",
+		"X-Claude-Code-Parent-Agent-Id",
+		"X-Claude-Remote-Container-Id",
+		"X-Claude-Remote-Session-Id",
+		"X-Client-App",
+		"X-Anthropic-Additional-Protection",
+	} {
+		if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
+			r.Header.Set(hdr, val)
+		}
+	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
 	// helper keeps its own native request ID and this fresh UUID only covers a caller
@@ -951,6 +1048,7 @@ func applyClaudeHeadersWithNativeProfile(
 // exactly how the streaming and non-streaming beta sets diverged before.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	applyClaudeWireHeaderCasing(req)
+	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	return client.Do(req)
 }
 
@@ -1392,6 +1490,25 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 							return true
 						})
 					}
+				case "tool_search_tool_result":
+					toolRefs := part.Get("content.tool_references")
+					if toolRefs.Exists() && toolRefs.IsArray() {
+						toolRefs.ForEach(func(_, refPart gjson.Result) bool {
+							if refPart.Get("type").String() != "tool_reference" {
+								return true
+							}
+							nameResult := refPart.Get("tool_name")
+							refToolName := nameResult.String()
+							if newName, renamed := rewriteName(refToolName); renamed {
+								if !appendStringEdit(nameResult, newName) {
+									validOffsets = false
+									return false
+								}
+								recordRename(refToolName, newName)
+							}
+							return true
+						})
+					}
 				}
 				return validOffsets
 			})
@@ -1620,6 +1737,21 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 							return true
 						})
 					}
+				case "tool_search_tool_result":
+					toolRefs := part.Get("content.tool_references")
+					if toolRefs.Exists() && toolRefs.IsArray() {
+						toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+							if refPart.Get("type").String() == "tool_reference" {
+								refToolName := refPart.Get("tool_name").String()
+								if newName, renamed := rewriteName(refToolName); renamed {
+									refPath := fmt.Sprintf("messages.%d.content.%d.content.tool_references.%d.tool_name", msgIndex.Int(), contentIndex.Int(), refIndex.Int())
+									body, _ = sjson.SetBytes(body, refPath, newName)
+									recordRename(refToolName, newName)
+								}
+							}
+							return true
+						})
+					}
 				}
 				return true
 			})
@@ -1646,6 +1778,18 @@ type claudeMCPAliasResolver struct {
 	exact   map[string]string
 	aliases []claudeMCPAliasEntry
 	servers map[string]struct{}
+}
+
+type claudeMCPAliasRestoreError struct {
+	error
+}
+
+func (e claudeMCPAliasRestoreError) Unwrap() error {
+	return e.error
+}
+
+func (claudeMCPAliasRestoreError) IsRequestScoped() bool {
+	return true
 }
 
 func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResolver {
@@ -1761,7 +1905,7 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)}
 	}
 
 	parts, validAlias := parseClaudeMCPAlias(normalizedName)
@@ -1816,10 +1960,10 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)}
 	}
 
-	return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)
+	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
@@ -1880,6 +2024,26 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 					return true
 				})
 			}
+		case "tool_search_tool_result":
+			toolRefs := part.Get("content.tool_references")
+			if toolRefs.Exists() && toolRefs.IsArray() {
+				toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+					if refPart.Get("type").String() != "tool_reference" {
+						return true
+					}
+					toolName := refPart.Get("tool_name").String()
+					origName, matched, errResolve := resolver.resolve(toolName)
+					if errResolve != nil {
+						resolveErr = errResolve
+						return false
+					}
+					if matched {
+						path := fmt.Sprintf("content.%d.content.tool_references.%d.tool_name", index.Int(), refIndex.Int())
+						body, _ = sjson.SetBytes(body, path, origName)
+					}
+					return true
+				})
+			}
 		}
 		return resolveErr == nil
 	})
@@ -1928,6 +2092,44 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 			return line, nil
 		}
 		updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
+	case "tool_search_tool_result":
+		toolRefs := contentBlock.Get("content.tool_references")
+		if !toolRefs.Exists() || !toolRefs.IsArray() {
+			return line, nil
+		}
+		updatedPayload := payload
+		var resolveErr error
+		hasChange := false
+		toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+			if refPart.Get("type").String() != "tool_reference" {
+				return true
+			}
+			toolName := refPart.Get("tool_name").String()
+			origName, matched, errResolve := resolver.resolve(toolName)
+			if errResolve != nil {
+				resolveErr = errResolve
+				return false
+			}
+			if matched {
+				path := fmt.Sprintf("content_block.content.tool_references.%d.tool_name", refIndex.Int())
+				updatedPayload, err = sjson.SetBytes(updatedPayload, path, origName)
+				if err != nil {
+					return false
+				}
+				hasChange = true
+			}
+			return true
+		})
+		if resolveErr != nil {
+			return line, resolveErr
+		}
+		if err != nil {
+			return line, fmt.Errorf("rewrite Claude OAuth MCP tool alias: %w", err)
+		}
+		if !hasChange {
+			return line, nil
+		}
+		updated = updatedPayload
 	default:
 		return line, nil
 	}

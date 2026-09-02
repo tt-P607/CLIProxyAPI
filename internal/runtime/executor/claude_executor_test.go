@@ -617,7 +617,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, nil, cfg, nil, false)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", "MacOS", "arm64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
@@ -659,7 +659,7 @@ func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForCla
 	})
 	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, nil, cfg, nil, true)
 
-	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.70.0", "v22.0.0", "MacOS", "arm64")
 }
 
 func TestApplyClaudeHeaders_LegacyThirdPartyUsesStableConfiguredOSArch(t *testing.T) {
@@ -740,6 +740,55 @@ func TestApplyClaudeHeaders_UsesOAuthAuthorizationAndBrowserFingerprint(t *testi
 	}
 }
 
+func TestApplyClaudeHeaders_EmptyAPIKey_OmitsAuthHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind":           "apikey",
+			"base_url":            "https://custom-claude.example.com",
+			"header:Custom-Token": "custom-secret",
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://custom-claude.example.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	// Preset preexisting client headers to ensure they get stripped for empty API key
+	req.Header.Set("Authorization", "Bearer preexisting-bearer")
+	req.Header.Set("x-api-key", "preexisting-key")
+
+	if errHeaders := applyClaudeHeaders(req, auth, "", false, nil, nil, &config.Config{}, nil, false); errHeaders != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("Custom-Token"); got != "custom-secret" {
+		t.Fatalf("Custom-Token = %q, want custom-secret", got)
+	}
+
+	// Also verify PrepareRequest
+	req2, _ := http.NewRequest(http.MethodPost, "https://custom-claude.example.com/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer preexisting-bearer")
+	req2.Header.Set("x-api-key", "preexisting-key")
+	exec := &ClaudeExecutor{}
+	if errPrep := exec.PrepareRequest(req2, auth); errPrep != nil {
+		t.Fatalf("PrepareRequest() error = %v", errPrep)
+	}
+	if got := req2.Header.Get("Authorization"); got != "" {
+		t.Fatalf("PrepareRequest Authorization = %q, want empty", got)
+	}
+	if got := req2.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("PrepareRequest x-api-key = %q, want empty", got)
+	}
+	if got := req2.Header.Get("Custom-Token"); got != "custom-secret" {
+		t.Fatalf("PrepareRequest Custom-Token = %q, want custom-secret", got)
+	}
+}
+
 func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -767,7 +816,7 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.220 (external, cli)", "0.94.0", "v26.3.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.220 (external, cli)", "0.94.0", "v26.3.0", "MacOS", "arm64")
 	if got := seenHeaders.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}
@@ -5547,6 +5596,17 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			body: `{"model":"claude-opus-4-6","thinking":{"type":"adaptive","display":"  "}}`,
 			want: constants + ",effort-2025-11-24",
 		},
+		{
+			name:      "advisor tool beta requested placed before advanced-tool-use",
+			body:      `{"model":"claude-opus-5","tools":[{"name":"Read"}]}`,
+			requested: map[string]bool{"advisor-tool-2026-03-01": true},
+			want:      constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "body with advisor server tool automatically adds advisor-tool beta",
+			body: `{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`,
+			want: constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
 	}
 
 	for _, tt := range tests {
@@ -6315,6 +6375,103 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 			// without a 1h body ttl, is a combination native never produces.
 			if (gotTTL == "1h") != gotBeta {
 				t.Fatalf("body ttl %q and extended-cache-ttl beta %v disagree", gotTTL, gotBeta)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) {
+	tests := []struct {
+		name            string
+		incomingHeaders http.Header
+		wantHeaders     map[string]string
+		wantAbsent      []string
+	}{
+		{
+			name: "preserves canonical agent and parent agent headers",
+			incomingHeaders: http.Header{
+				"X-Claude-Code-Agent-Id":        {"subagent-001"},
+				"X-Claude-Code-Parent-Agent-Id": {"parent-agent-root"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":        "subagent-001",
+				"X-Claude-Code-Parent-Agent-Id": "parent-agent-root",
+			},
+		},
+		{
+			name: "preserves lowercased agent and environment headers",
+			incomingHeaders: http.Header{
+				"x-claude-code-agent-id":            {"agent-xyz"},
+				"x-claude-remote-container-id":      {"container-123"},
+				"x-claude-remote-session-id":        {"remote-sess-456"},
+				"x-client-app":                      {"custom-sdk"},
+				"x-anthropic-additional-protection": {"true"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":            "agent-xyz",
+				"X-Claude-Remote-Container-Id":      "container-123",
+				"X-Claude-Remote-Session-Id":        "remote-sess-456",
+				"X-Client-App":                      "custom-sdk",
+				"X-Anthropic-Additional-Protection": "true",
+			},
+		},
+		{
+			name: "does not fabricate agent header when absent",
+			incomingHeaders: http.Header{
+				"User-Agent": {"test-client"},
+			},
+			wantAbsent: []string{
+				"X-Claude-Code-Agent-Id",
+				"X-Claude-Code-Parent-Agent-Id",
+				"X-Claude-Remote-Container-Id",
+				"X-Claude-Remote-Session-Id",
+				"X-Client-App",
+				"X-Anthropic-Additional-Protection",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_agent","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID: "agent-header-test",
+				Attributes: map[string]string{
+					"api_key":    "sk-ant-test-key",
+					"base_url":   server.URL,
+					"cloak_mode": "always",
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+
+			_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Headers:      tt.incomingHeaders,
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			for wantKey, wantVal := range tt.wantHeaders {
+				if got := seenHeaders.Get(wantKey); got != wantVal {
+					t.Errorf("header %s = %q, want %q", wantKey, got, wantVal)
+				}
+			}
+			for _, absentKey := range tt.wantAbsent {
+				if got := seenHeaders.Get(absentKey); got != "" {
+					t.Errorf("header %s = %q, want absent", absentKey, got)
+				}
 			}
 		})
 	}
