@@ -113,23 +113,29 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						continue
 					}
 
-					var devParts [][]byte
+					// A mid-session system/developer message has no native upstream
+					// equivalent, so it is demoted to a user turn. Join its text and wrap
+					// it in the reminder envelope: without one the model reads the
+					// instruction as something the user said and echoes it back in its
+					// reasoning.
+					var devTexts []string
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						if contentArray.IsArray() {
 							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-								text := contentItem.Get("text").String()
-								if text != "" {
-									part := []byte(`{"text":""}`)
-									part, _ = sjson.SetBytes(part, "text", text)
-									devParts = append(devParts, part)
+								if text := contentItem.Get("text").String(); text != "" {
+									devTexts = append(devTexts, text)
 								}
 								return true
 							})
 						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
-							part := []byte(`{"text":""}`)
-							part, _ = sjson.SetBytes(part, "text", contentArray.String())
-							devParts = append(devParts, part)
+							devTexts = append(devTexts, contentArray.String())
 						}
+					}
+					var devParts [][]byte
+					if joined := strings.Join(devTexts, "\n"); strings.TrimSpace(joined) != "" {
+						part := []byte(`{"text":""}`)
+						part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(joined))
+						devParts = append(devParts, part)
 					}
 					if len(devParts) > 0 {
 						if len(pendingFunctionCallIDs) > 0 {

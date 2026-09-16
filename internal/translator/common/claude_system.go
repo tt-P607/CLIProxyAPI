@@ -12,6 +12,16 @@ const (
 	claudeSystemReminderEnd   = "</system-reminder>"
 )
 
+// SystemReminderText wraps text in the <system-reminder> envelope.
+//
+// Upstream formats without a native mid-conversation system role (Gemini,
+// Antigravity) receive mid-session system/developer instructions demoted to user
+// turns. Without the envelope the model reads that text as something the user
+// said and echoes it back in its reasoning, so callers must wrap it.
+func SystemReminderText(text string) string {
+	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd
+}
+
 // ClaudeMessageSystemReminderText converts a Claude message-level system value
 // into ordinary user-visible reminder text for non-Claude upstream formats.
 func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
@@ -23,7 +33,7 @@ func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
 	if strings.TrimSpace(text) == "" {
 		return "", false
 	}
-	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd, true
+	return SystemReminderText(text), true
 }
 
 func claudeSystemTextParts(content gjson.Result) []string {

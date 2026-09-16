@@ -184,17 +184,24 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				}
 			} else if role == "user" || role == "system" || role == "developer" {
 				hasEncounteredConversation = true
+				// A mid-session system/developer message has no native upstream equivalent,
+				// so it is demoted to a user turn. Wrap it in the reminder envelope: without
+				// one the model reads the instruction as something the user said and echoes
+				// it back in its reasoning. Leaving it as its own turn (rather than merging
+				// it into a neighbouring user turn) also keeps the persisted conversation
+				// prefix byte-identical across turns, because this turn is transient.
+				demotedSystem := role == "system" || role == "developer"
 				partItems := make([][]byte, 0, 4)
 				if content.Type == gjson.String {
-					partItems = append(partItems, antigravityOpenAITextPart(content.String()))
+					partItems = append(partItems, antigravityOpenAITextPart(antigravityOpenAIDemotedSystemText(content.String(), demotedSystem)))
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					partItems = append(partItems, antigravityOpenAITextPart(content.Get("text").String()))
+					partItems = append(partItems, antigravityOpenAITextPart(antigravityOpenAIDemotedSystemText(content.Get("text").String(), demotedSystem)))
 				} else if content.IsArray() {
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
 							if text := item.Get("text").String(); text != "" {
-								partItems = append(partItems, antigravityOpenAITextPart(text))
+								partItems = append(partItems, antigravityOpenAITextPart(antigravityOpenAIDemotedSystemText(text, demotedSystem)))
 							}
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
@@ -446,6 +453,16 @@ func antigravityOpenAITextPart(text string) []byte {
 	part := []byte(`{"text":""}`)
 	part, _ = sjson.SetBytes(part, "text", text)
 	return part
+}
+
+// antigravityOpenAIDemotedSystemText wraps a demoted mid-session system/developer
+// message in the <system-reminder> envelope so the model does not read the
+// instruction as user speech. Ordinary user turns pass through unchanged.
+func antigravityOpenAIDemotedSystemText(text string, demoted bool) string {
+	if !demoted || strings.TrimSpace(text) == "" {
+		return text
+	}
+	return translatorcommon.SystemReminderText(text)
 }
 
 func antigravityOpenAIInlineDataPart(mimeType, data string, snakeCase bool) []byte {

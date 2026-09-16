@@ -170,18 +170,23 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				}
 			} else if role == "user" || role == "system" || role == "developer" {
 				hasEncounteredConversation = true
+				// A mid-session system/developer message has no native upstream equivalent,
+				// so it is demoted to a user turn. Wrap it in the reminder envelope: without
+				// one the model reads the instruction as something the user said and echoes
+				// it back in its reasoning.
+				demotedSystem := role == "system" || role == "developer"
 				// Build single user content node to avoid splitting into multiple contents.
 				partItems := make([][]byte, 0, 4)
 				if content.Type == gjson.String {
-					partItems = append(partItems, geminiTextPart(content.String()))
+					partItems = append(partItems, geminiTextPart(geminiOpenAIDemotedSystemText(content.String(), demotedSystem)))
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					partItems = append(partItems, geminiTextPart(content.Get("text").String()))
+					partItems = append(partItems, geminiTextPart(geminiOpenAIDemotedSystemText(content.Get("text").String(), demotedSystem)))
 				} else if content.IsArray() {
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
 							if text := item.Get("text").String(); text != "" {
-								partItems = append(partItems, geminiTextPart(text))
+								partItems = append(partItems, geminiTextPart(geminiOpenAIDemotedSystemText(text, demotedSystem)))
 							}
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
@@ -430,6 +435,16 @@ func geminiTextPart(text string) []byte {
 	part := []byte(`{"text":""}`)
 	part, _ = sjson.SetBytes(part, "text", text)
 	return part
+}
+
+// geminiOpenAIDemotedSystemText wraps a demoted mid-session system/developer
+// message in the <system-reminder> envelope so the model does not read the
+// instruction as user speech. Ordinary user turns pass through unchanged.
+func geminiOpenAIDemotedSystemText(text string, demoted bool) string {
+	if !demoted || strings.TrimSpace(text) == "" {
+		return text
+	}
+	return translatorcommon.SystemReminderText(text)
 }
 
 func geminiInlineDataPart(mimeType, data, thoughtSignature string) []byte {

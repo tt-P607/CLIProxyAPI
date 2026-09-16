@@ -1079,8 +1079,8 @@ func TestConvertOpenAIResponsesRequestToGemini_MidSessionDeveloperMessageDoesNot
 	if len(turn2Parts) != 2 {
 		t.Fatalf("turn 2 parts count = %d, want 2; output=%s", len(turn2Parts), output)
 	}
-	if got := turn2Parts[0].Get("text").String(); got != "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>" {
-		t.Fatalf("turn 2 part 0 = %q, want image_resize_notice; output=%s", got, output)
+	if got := turn2Parts[0].Get("text").String(); got != "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>" {
+		t.Fatalf("turn 2 part 0 = %q, want the wrapped image_resize_notice; output=%s", got, output)
 	}
 	if got := turn2Parts[1].Get("text").String(); got != "Turn 2 user" {
 		t.Fatalf("turn 2 part 1 = %q, want Turn 2 user; output=%s", got, output)

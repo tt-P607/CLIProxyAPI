@@ -259,7 +259,9 @@ func TestConvertOpenAIRequestToGemini_MidSessionDeveloperMessageDoesNotMutateSys
 	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.text").String() != "Turn 1 assistant" {
 		t.Fatalf("turn 1 mismatch: %s", contents[1].Raw)
 	}
-	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>" {
+	// The demoted notice keeps its own transient user turn, wrapped in the reminder
+	// envelope so the model does not read the instruction as user speech.
+	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>" {
 		t.Fatalf("turn 2 mismatch: %s", contents[2].Raw)
 	}
 	if contents[3].Get("role").String() != "user" || contents[3].Get("parts.0.text").String() != "Turn 2 user" {

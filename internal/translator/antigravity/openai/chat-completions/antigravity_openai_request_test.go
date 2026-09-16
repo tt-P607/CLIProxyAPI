@@ -224,11 +224,70 @@ func TestConvertOpenAIRequestToAntigravity_MidSessionDeveloperMessageDoesNotMuta
 	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.text").String() != "Turn 1 assistant" {
 		t.Fatalf("turn 1 mismatch: %s", contents[1].Raw)
 	}
-	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>" {
+	// The demoted notice keeps its own transient user turn, wrapped in the reminder
+	// envelope so the model does not read the instruction as user speech.
+	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>" {
 		t.Fatalf("turn 2 mismatch: %s", contents[2].Raw)
 	}
 	if contents[3].Get("role").String() != "user" || contents[3].Get("parts.0.text").String() != "Turn 2 user" {
 		t.Fatalf("turn 3 mismatch: %s", contents[3].Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_MidSessionSystemKeepsPriorContentStable(t *testing.T) {
+	// Some clients re-append a "last mile" tool instruction as a mid-session system
+	// message on every turn, and that instruction is transient: the client does not
+	// replay it as part of the persisted history on the following turn. The demoted
+	// turn must therefore stay its own content entry. Merging it into the neighbouring
+	// user turn would stitch transient text into a message the client later replays
+	// without it, so the upstream content prefix would differ between turns and the
+	// Gemini prefix cache would be invalidated from that point on.
+	const systemPrompt = "You are a helpful assistant"
+	const instruction = "Decide which tool to call next."
+
+	turn1 := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "system", "content": "` + systemPrompt + `"},
+			{"role": "user", "content": "turn one"},
+			{"role": "assistant", "content": "answer one"},
+			{"role": "system", "content": "` + instruction + `"}
+		]
+	}`
+	turn2 := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "system", "content": "` + systemPrompt + `"},
+			{"role": "user", "content": "turn one"},
+			{"role": "assistant", "content": "answer one"},
+			{"role": "user", "content": "turn two"},
+			{"role": "assistant", "content": "answer two"},
+			{"role": "system", "content": "` + instruction + `"}
+		]
+	}`
+
+	wantWrapped := "<system-reminder>\n" + instruction + "\n</system-reminder>"
+	first := gjson.GetBytes(ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(turn1), false), "request.contents").Array()
+	second := gjson.GetBytes(ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(turn2), false), "request.contents").Array()
+
+	if len(first) != 3 {
+		t.Fatalf("turn 1 contents = %d, want 3 (the demoted instruction stays its own turn); contents=%v", len(first), first)
+	}
+	if got := first[2].Get("parts.0.text").String(); got != wantWrapped {
+		t.Fatalf("turn 1 demoted text = %q, want wrapped instruction", got)
+	}
+	// The persisted prefix must survive: turn 1's history entries are byte-identical in
+	// turn 2, so the upstream can reuse the cached prefix.
+	for i := 0; i < 2; i++ {
+		if first[i].Raw != second[i].Raw {
+			t.Fatalf("content[%d] changed between turns, breaking the cached prefix:\n turn1=%s\n turn2=%s", i, first[i].Raw, second[i].Raw)
+		}
+	}
+	if len(second) != 5 {
+		t.Fatalf("turn 2 contents = %d, want 5; contents=%v", len(second), second)
+	}
+	if got := second[4].Get("parts.0.text").String(); got != wantWrapped {
+		t.Fatalf("turn 2 demoted text = %q, want wrapped instruction", got)
 	}
 }
 
