@@ -12,12 +12,9 @@ const (
 	claudeSystemReminderEnd   = "</system-reminder>"
 )
 
-// SystemReminderText wraps text in the <system-reminder> envelope.
-//
-// Upstream formats without a native mid-conversation system role (Gemini,
-// Antigravity) receive mid-session system/developer instructions demoted to user
-// turns. Without the envelope the model reads that text as something the user
-// said and echoes it back in its reasoning, so callers must wrap it.
+// SystemReminderText wraps text in the <system-reminder> envelope so non-Claude
+// upstream formats treat demoted mid-session system or developer instructions
+// as system directives rather than user speech.
 func SystemReminderText(text string) string {
 	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd
 }

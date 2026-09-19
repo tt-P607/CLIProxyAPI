@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -27,16 +28,31 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Extract tools and forward map early so request contents and toolDeclarations use the exact same forward map
 	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
+	var toolBlocks [][]byte
+	if HasResponsesWebSearchTool(root) && ModelSupportsWebSearch(modelName) && AllowsResponsesWebSearchToolChoice(root) {
+		googleSearchBlock := []byte(`{"googleSearch":{}}`)
+		if allowedDomains := ExtractResponsesWebSearchAllowedDomains(root); len(allowedDomains) > 0 {
+			if domainsJSON, errMarshal := json.Marshal(allowedDomains); errMarshal == nil {
+				googleSearchBlock, _ = sjson.SetRawBytes(googleSearchBlock, "googleSearch.includedDomains", domainsJSON)
+			}
+		}
+		toolBlocks = append(toolBlocks, googleSearchBlock)
+	}
 	if len(functionDeclarations) > 0 {
-		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-		geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
-		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+		fnBlock := []byte(`{"functionDeclarations":[]}`)
+		fnBlock, _ = sjson.SetRawBytes(fnBlock, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
+		toolBlocks = append(toolBlocks, fnBlock)
+	}
+	if len(toolBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolBlocks))
 	}
 
-	// Handle tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
-			out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+	// Handle tool_choice if present (only configure function calling when function declarations exist)
+	if len(functionDeclarations) > 0 {
+		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+			if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
+				out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+			}
 		}
 	}
 
@@ -113,29 +129,36 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						continue
 					}
 
-					// A mid-session system/developer message has no native upstream
-					// equivalent, so it is demoted to a user turn. Join its text and wrap
-					// it in the reminder envelope: without one the model reads the
-					// instruction as something the user said and echoes it back in its
-					// reasoning.
-					var devTexts []string
+					var devParts [][]byte
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						if contentArray.IsArray() {
+							var texts []string
 							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-								if text := contentItem.Get("text").String(); text != "" {
-									devTexts = append(devTexts, text)
+								text := contentItem.Get("text").String()
+								if text == "" && contentItem.Type == gjson.String {
+									text = contentItem.String()
+								}
+								if text != "" {
+									texts = append(texts, text)
 								}
 								return true
 							})
+							if len(texts) > 0 {
+								joined := strings.Join(texts, "\n")
+								if strings.TrimSpace(joined) != "" {
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(joined))
+									devParts = append(devParts, part)
+								}
+							}
 						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
-							devTexts = append(devTexts, contentArray.String())
+							text := contentArray.String()
+							if strings.TrimSpace(text) != "" {
+								part := []byte(`{"text":""}`)
+								part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(text))
+								devParts = append(devParts, part)
+							}
 						}
-					}
-					var devParts [][]byte
-					if joined := strings.Join(devTexts, "\n"); strings.TrimSpace(joined) != "" {
-						part := []byte(`{"text":""}`)
-						part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(joined))
-						devParts = append(devParts, part)
 					}
 					if len(devParts) > 0 {
 						if len(pendingFunctionCallIDs) > 0 {
