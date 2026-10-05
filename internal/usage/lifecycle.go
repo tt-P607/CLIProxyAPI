@@ -3,8 +3,8 @@ package usage
 import (
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // statsFileName is the file name used to persist usage statistics under the auth directory.
