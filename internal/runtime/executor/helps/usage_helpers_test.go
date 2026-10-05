@@ -578,6 +578,16 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesRequestFingerprint(t *testing.T) {
+	ctx := usage.WithRequestFingerprint(context.Background(), http.Header{"X-Session-ID": []string{"abc"}})
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{}, false)
+	if record.RequestFingerprint != "ba7816bf8f01cfea414140de5dae2223" {
+		t.Fatalf("request fingerprint = %q, want digest", record.RequestFingerprint)
+	}
+}
+
 func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	delay := 40 * time.Millisecond
 	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())

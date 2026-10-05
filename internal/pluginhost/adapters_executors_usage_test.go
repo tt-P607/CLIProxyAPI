@@ -864,12 +864,34 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 
 	// 1. Record has empty session fields, should recover from context
 	adapter.HandleUsage(ctx, coreusage.Record{
-		Provider: "test-provider",
-		Model:    "test-model",
+		Provider:           "test-provider",
+		Model:              "test-model",
+		RequestFingerprint: "ba7816bf8f01cfea414140de5dae2223",
+		Detail: coreusage.Detail{
+			InputTokens: 11, OutputTokens: 7, CachedTokens: 3, CacheReadTokens: 2,
+			CacheCreationTokens: 4, ReasoningTokens: 5, TotalTokens: 18,
+		},
 	})
 	rec := <-plugin.captured
 	if rec.SessionID != "sess-ctx-1" || rec.ParentSessionID != "parent-ctx-1" {
 		t.Fatalf("recovered session = (%q, %q), want (sess-ctx-1, parent-ctx-1)", rec.SessionID, rec.ParentSessionID)
+	}
+	if rec.RequestFingerprint != "ba7816bf8f01cfea414140de5dae2223" {
+		t.Fatalf("request fingerprint = %q, want digest", rec.RequestFingerprint)
+	}
+	if rec.Detail.InputTokens != 11 || rec.Detail.OutputTokens != 7 || rec.Detail.CachedTokens != 3 || rec.Detail.CacheReadTokens != 2 || rec.Detail.CacheCreationTokens != 4 || rec.Detail.ReasoningTokens != 5 || rec.Detail.TotalTokens != 18 {
+		t.Fatalf("usage detail = %+v, want original token details", rec.Detail)
+	}
+
+	adapter.HandleUsage(ctx, coreusage.Record{
+		Provider:           "test-provider",
+		Model:              "test-model",
+		SessionID:          "header:canonical-session",
+		RequestFingerprint: "ba7816bf8f01cfea414140de5dae2223",
+	})
+	recHeaderSession := <-plugin.captured
+	if recHeaderSession.SessionID != "header:canonical-session" || recHeaderSession.RequestFingerprint != "ba7816bf8f01cfea414140de5dae2223" {
+		t.Fatalf("header-derived session/fingerprint = (%q, %q), want canonical session and independent digest", recHeaderSession.SessionID, recHeaderSession.RequestFingerprint)
 	}
 
 	// 2. Self-referential loop protection in context

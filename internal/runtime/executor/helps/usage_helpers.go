@@ -37,6 +37,7 @@ type UsageReporter struct {
 	authType            string
 	apiKey              string
 	sessionID           string
+	requestFingerprint  string
 	parentSessionID     string
 	source              string
 	reasoning           string
@@ -107,20 +108,21 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		}
 	}
 	reporter := &UsageReporter{
-		provider:        provider,
-		baseURL:         baseURL,
-		model:           model,
-		alias:           strings.TrimSpace(alias),
-		requestedAt:     time.Now(),
-		apiKey:          apiKey,
-		sessionID:       sessionID,
-		parentSessionID: parentSessionID,
-		source:          resolveUsageSource(auth, apiKey),
-		authType:        resolveUsageAuthType(auth),
-		reasoning:       usage.ReasoningEffortFromContext(ctx),
-		serviceTier:     usage.ServiceTierFromContext(ctx),
-		generate:        usage.GenerateFromContext(ctx),
-		stream:          usage.StreamFromContext(ctx),
+		provider:           provider,
+		baseURL:            baseURL,
+		model:              model,
+		alias:              strings.TrimSpace(alias),
+		requestedAt:        time.Now(),
+		apiKey:             apiKey,
+		sessionID:          sessionID,
+		requestFingerprint: usage.RequestFingerprintFromContext(ctx),
+		parentSessionID:    parentSessionID,
+		source:             resolveUsageSource(auth, apiKey),
+		authType:           resolveUsageAuthType(auth),
+		reasoning:          usage.ReasoningEffortFromContext(ctx),
+		serviceTier:        usage.ServiceTierFromContext(ctx),
+		generate:           usage.GenerateFromContext(ctx),
+		stream:             usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -615,6 +617,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Source:              r.source,
 		APIKey:              r.apiKey,
 		SessionID:           r.sessionID,
+		RequestFingerprint:  r.requestFingerprint,
 		ParentSessionID:     r.parentSessionID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,

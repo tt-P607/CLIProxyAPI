@@ -2,11 +2,49 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
+
+func TestContextWithRequestedModelAliasRequestFingerprint(t *testing.T) {
+	headers := http.Header{"X-Session-ID": []string{" abc "}}
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{Headers: headers}, "model-a")
+	const want = "ba7816bf8f01cfea414140de5dae2223"
+	if got := coreusage.RequestFingerprintFromContext(ctx); got != want {
+		t.Fatalf("request fingerprint = %q, want %q", got, want)
+	}
+
+	modelBCtx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{Headers: http.Header{"x-session-id": []string{"abc"}}}, "model-b")
+	if got := coreusage.RequestFingerprintFromContext(modelBCtx); got != want {
+		t.Fatalf("fingerprint for another model = %q, want %q", got, want)
+	}
+
+	headers.Set("X-Session-ID", "changed")
+	if got := coreusage.RequestFingerprintFromContext(ctx); got != want {
+		t.Fatalf("fingerprint changed with headers after context creation: %q", got)
+	}
+}
+
+func TestContextWithRequestedModelAliasRejectsInvalidRequestFingerprintHeaders(t *testing.T) {
+	for name, headers := range map[string]http.Header{
+		"missing":      {},
+		"empty":        {"X-Session-ID": []string{"  "}},
+		"repeat":       {"X-Session-ID": []string{"abc", "abc"}},
+		"case_repeat":  {"X-Session-ID": []string{"abc"}, "x-session-id": []string{"abc"}},
+		"empty_repeat": {"X-Session-ID": []string{"abc"}, "x-session-id": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := coreusage.WithRequestFingerprint(context.Background(), http.Header{"X-Session-ID": []string{"inherited"}})
+			ctx = contextWithRequestedModelAlias(ctx, cliproxyexecutor.Options{Headers: headers}, "model")
+			if got := coreusage.RequestFingerprintFromContext(ctx); got != "" {
+				t.Fatalf("request fingerprint = %q, want empty", got)
+			}
+		})
+	}
+}
 
 func TestContextWithRequestedModelAliasIncludesStream(t *testing.T) {
 	for _, stream := range []bool{false, true} {

@@ -1416,6 +1416,8 @@ type UsageRecord struct {
 	APIKey string
 	// SessionID identifies the session when present.
 	SessionID string
+	// RequestFingerprint is a digest of the unique X-Session-ID request header.
+	RequestFingerprint string
 	// ParentSessionID identifies the parent session in a hierarchy or fork.
 	ParentSessionID string
 	// AuthID identifies the selected credential.

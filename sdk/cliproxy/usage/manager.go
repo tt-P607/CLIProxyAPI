@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,14 +26,15 @@ type Record struct {
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType    string
-	Model           string
-	Alias           string
-	APIKey          string
-	SessionID       string
-	ParentSessionID string
-	AuthID          string
-	AuthIndex       string
+	ExecutorType       string
+	Model              string
+	Alias              string
+	APIKey             string
+	SessionID          string
+	RequestFingerprint string
+	ParentSessionID    string
+	AuthID             string
+	AuthIndex          string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
 	AccessTokenSHA256 string
 	AuthType          string
@@ -87,6 +90,40 @@ type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
 type streamContextKey struct{}
+type requestFingerprintContextKey struct{}
+
+// WithRequestFingerprint stores a digest of the unique non-empty X-Session-ID header.
+func WithRequestFingerprint(ctx context.Context, headers http.Header) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	value := ""
+	headerCount := 0
+	for name, values := range headers {
+		if !strings.EqualFold(name, "X-Session-ID") {
+			continue
+		}
+		headerCount++
+		if headerCount > 1 || len(values) != 1 {
+			return context.WithValue(ctx, requestFingerprintContextKey{}, "")
+		}
+		value = strings.TrimSpace(values[0])
+	}
+	if headerCount != 1 || value == "" {
+		return context.WithValue(ctx, requestFingerprintContextKey{}, "")
+	}
+	digest := sha256.Sum256([]byte(value))
+	return context.WithValue(ctx, requestFingerprintContextKey{}, hex.EncodeToString(digest[:16]))
+}
+
+// RequestFingerprintFromContext returns the request fingerprint stored in ctx.
+func RequestFingerprintFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(requestFingerprintContextKey{}).(string)
+	return value
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {

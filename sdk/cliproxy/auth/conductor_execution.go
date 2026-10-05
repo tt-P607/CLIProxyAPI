@@ -1574,6 +1574,7 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 }
 
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
+	ctx = coreusage.WithRequestFingerprint(ctx, opts.Headers)
 	alias := requestedModelAliasFromOptions(opts, fallback)
 	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
 	effort := reasoningEffortFromOptions(opts)
