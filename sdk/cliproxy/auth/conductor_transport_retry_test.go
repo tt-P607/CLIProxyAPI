@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func windowsCodexTLSHandshakeError() error {
@@ -270,4 +271,242 @@ func (e *transportThenSuccessExecutor) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
+}
+
+type affinityRetryOutcome struct {
+	err    error
+	chunks []cliproxyexecutor.StreamChunk
+}
+
+type affinityRetryExecutor struct {
+	mu         sync.Mutex
+	identifier string
+	outcomes   []affinityRetryOutcome
+	authIDs    []string
+}
+
+func (e *affinityRetryExecutor) Identifier() string { return e.identifier }
+
+func (e *affinityRetryExecutor) next(auth *Auth) affinityRetryOutcome {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.authIDs = append(e.authIDs, auth.ID)
+	index := len(e.authIDs) - 1
+	if index >= len(e.outcomes) {
+		return affinityRetryOutcome{}
+	}
+	return e.outcomes[index]
+}
+
+func (e *affinityRetryExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	outcome := e.next(auth)
+	if outcome.err != nil {
+		return cliproxyexecutor.Response{}, outcome.err
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *affinityRetryExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	outcome := e.next(auth)
+	if outcome.err != nil {
+		return nil, outcome.err
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, len(outcome.chunks))
+	for _, chunk := range outcome.chunks {
+		chunks <- chunk
+	}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (*affinityRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
+
+func (e *affinityRetryExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return e.Execute(ctx, auth, req, opts)
+}
+
+func (*affinityRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *affinityRetryExecutor) attemptedAuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+type boundAuthPluginScheduler struct {
+	boundSource string
+	requests    []pluginapi.SchedulerPickRequest
+}
+
+func (*boundAuthPluginScheduler) SchedulerWantsAcrossPriorities() bool { return true }
+
+func (s *boundAuthPluginScheduler) PickAuth(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	s.requests = append(s.requests, req)
+	for _, candidate := range req.Candidates {
+		if candidate.Attributes["source"] == s.boundSource {
+			return pluginapi.SchedulerPickResponse{Handled: true, AuthID: candidate.ID}, true, nil
+		}
+	}
+	return pluginapi.SchedulerPickResponse{}, true, &Error{
+		HTTPStatus: http.StatusServiceUnavailable,
+		Message:    "Deadline expired before operation could complete",
+	}
+}
+
+func newAffinityRetryManager(t *testing.T, retryRounds int, outcomes ...affinityRetryOutcome) (*Manager, *affinityRetryExecutor, *boundAuthPluginScheduler, string) {
+	t.Helper()
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	provider := "antigravity"
+	model := "gemini-3.8-flash-" + uuid.NewString()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetRetryConfig(retryRounds, 0, 0)
+	manager.SetConfig(&internalconfig.Config{
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			provider: {{
+				Status: http.StatusServiceUnavailable,
+				Match:  []string{"Deadline expired before operation could complete"},
+				Action: RequestScopedActionContinue,
+			}},
+		},
+	})
+	registerRetryRoundLocalAuths(t, manager, provider, model, map[string]int{"auth-a": retryRounds, "auth-b": retryRounds})
+	for _, auth := range []*Auth{
+		{ID: "auth-a", Provider: provider, Status: StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "source": "bound-A"}},
+		{ID: "auth-b", Provider: provider, Status: StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "source": "other-B"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+	executor := &affinityRetryExecutor{identifier: provider, outcomes: outcomes}
+	manager.RegisterExecutor(executor)
+	scheduler := &boundAuthPluginScheduler{boundSource: "bound-A"}
+	manager.SetPluginScheduler(scheduler)
+	return manager, executor, scheduler, model
+}
+
+func affinityRetryOptions(sessionID string, stream bool) cliproxyexecutor.Options {
+	return cliproxyexecutor.Options{Stream: stream, Headers: http.Header{"X-Session-Id": []string{sessionID}}}
+}
+
+func assertAffinityAuthIDs(t *testing.T, executor *affinityRetryExecutor, want ...string) {
+	t.Helper()
+	got := executor.attemptedAuthIDs()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("attempted auth IDs = %v, want %v", got, want)
+	}
+}
+
+func assertAffinitySchedulerInputs(t *testing.T, scheduler *boundAuthPluginScheduler, sessionID string) {
+	t.Helper()
+	if len(scheduler.requests) == 0 {
+		t.Fatal("plugin scheduler was not called")
+	}
+	for _, request := range scheduler.requests {
+		if got := http.Header(request.Options.Headers).Get("X-Session-ID"); got != sessionID {
+			t.Fatalf("scheduler X-Session-ID = %q, want %q", got, sessionID)
+		}
+	}
+}
+
+func TestExecutePluginAffinityVetoPreservesBoundAuthAcrossRetryRounds(t *testing.T) {
+	const sessionID = "affinity-regression-session"
+	deadlineErr := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "Deadline expired before operation could complete"}
+
+	t.Run("503 then success", func(t *testing.T) {
+		manager, executor, scheduler, model := newAffinityRetryManager(t, 1,
+			affinityRetryOutcome{err: deadlineErr}, affinityRetryOutcome{})
+		resp, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, false))
+		if errExecute != nil || string(resp.Payload) != "ok" {
+			t.Fatalf("Execute() = (%q, %v), want success", resp.Payload, errExecute)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a", "auth-a")
+		assertAffinitySchedulerInputs(t, scheduler, sessionID)
+		assertNoCooldown(t, manager, "auth-a", model)
+	})
+
+	t.Run("ordinary EOF then success", func(t *testing.T) {
+		manager, executor, scheduler, model := newAffinityRetryManager(t, 1,
+			affinityRetryOutcome{err: io.ErrUnexpectedEOF}, affinityRetryOutcome{})
+		if _, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, false)); errExecute != nil {
+			t.Fatalf("Execute() error = %v, want success", errExecute)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a", "auth-a")
+		assertAffinitySchedulerInputs(t, scheduler, sessionID)
+		assertNoCooldown(t, manager, "auth-a", model)
+	})
+
+	t.Run("retry budget preserves upstream 503 and next request binding", func(t *testing.T) {
+		manager, executor, scheduler, model := newAffinityRetryManager(t, 2,
+			affinityRetryOutcome{err: deadlineErr}, affinityRetryOutcome{err: deadlineErr},
+			affinityRetryOutcome{err: deadlineErr}, affinityRetryOutcome{})
+		_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, false))
+		var statusErr interface{ StatusCode() int }
+		if !errors.As(errExecute, &statusErr) || statusErr.StatusCode() != http.StatusServiceUnavailable || errExecute.Error() != deadlineErr.Error() {
+			t.Fatalf("exhausted Execute() error = %v, want original upstream 503", errExecute)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a", "auth-a", "auth-a")
+		assertNoCooldown(t, manager, "auth-a", model)
+
+		if _, errNext := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, false)); errNext != nil {
+			t.Fatalf("next Execute() error = %v, want success", errNext)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a", "auth-a", "auth-a", "auth-a")
+		assertAffinitySchedulerInputs(t, scheduler, sessionID)
+	})
+
+	for _, terminalErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(terminalErr.Error()+" prevents replay", func(t *testing.T) {
+			manager, executor, _, model := newAffinityRetryManager(t, 1, affinityRetryOutcome{err: terminalErr})
+			_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, false))
+			if !errors.Is(errExecute, terminalErr) {
+				t.Fatalf("Execute() error = %v, want %v", errExecute, terminalErr)
+			}
+			assertAffinityAuthIDs(t, executor, "auth-a")
+		})
+	}
+}
+
+func TestExecuteStreamPluginAffinityVetoBootstrapAndDeliveredChunk(t *testing.T) {
+	const sessionID = "affinity-stream-regression-session"
+	bootstrapErr := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "Deadline expired before operation could complete"}
+
+	t.Run("bootstrap error then success", func(t *testing.T) {
+		manager, executor, scheduler, model := newAffinityRetryManager(t, 1,
+			affinityRetryOutcome{chunks: []cliproxyexecutor.StreamChunk{{Err: bootstrapErr}}},
+			affinityRetryOutcome{chunks: []cliproxyexecutor.StreamChunk{{Payload: []byte("ok")}}})
+		result, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, true))
+		if errStream != nil || result == nil {
+			t.Fatalf("ExecuteStream() = (%v, %v), want successful stream", result, errStream)
+		}
+		chunk := <-result.Chunks
+		if string(chunk.Payload) != "ok" || chunk.Err != nil {
+			t.Fatalf("stream chunk = (%q, %v), want ok", chunk.Payload, chunk.Err)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a", "auth-a")
+		assertAffinitySchedulerInputs(t, scheduler, sessionID)
+		assertNoCooldown(t, manager, "auth-a", model)
+	})
+
+	t.Run("delivered chunk error does not replay", func(t *testing.T) {
+		streamErr := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "Deadline expired before operation could complete"}
+		manager, executor, scheduler, model := newAffinityRetryManager(t, 1,
+			affinityRetryOutcome{chunks: []cliproxyexecutor.StreamChunk{{Payload: []byte("first")}, {Err: streamErr}}})
+		result, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, affinityRetryOptions(sessionID, true))
+		if errStream != nil || result == nil {
+			t.Fatalf("ExecuteStream() = (%v, %v), want stream before terminal chunk error", result, errStream)
+		}
+		first := <-result.Chunks
+		last := <-result.Chunks
+		if string(first.Payload) != "first" || !errors.Is(last.Err, streamErr) {
+			t.Fatalf("stream chunks = (%q, %v), (%q, %v), want delivered payload then original error", first.Payload, first.Err, last.Payload, last.Err)
+		}
+		assertAffinityAuthIDs(t, executor, "auth-a")
+		assertAffinitySchedulerInputs(t, scheduler, sessionID)
+	})
 }
