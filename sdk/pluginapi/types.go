@@ -1500,6 +1500,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+	IsNativeKey bool
+	// AccessProvider identifies the client request authentication provider (e.g. "config-inline" or plugin ID).
+	AccessProvider string
 	// SessionID identifies the session when present.
 	SessionID string
 	// RequestFingerprint is a digest of the unique X-Session-ID request header.

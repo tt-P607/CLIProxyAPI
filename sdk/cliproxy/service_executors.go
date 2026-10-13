@@ -236,12 +236,19 @@ func baselineExecutorAuths() []*coreauth.Auth {
 
 func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace bool) {
 	reboundCodex := false
+	reboundXAI := false
 	for _, auth := range auths {
 		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			if reboundCodex && forceReplace {
 				continue
 			}
 			reboundCodex = true
+		}
+		if auth != nil && !auth.Disabled && strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+			if reboundXAI && forceReplace {
+				continue
+			}
+			reboundXAI = true
 		}
 		s.registerExecutorForAuth(auth, forceReplace)
 	}
@@ -258,8 +265,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
 			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
+				existingCodexAutoExecutor, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
+				if isCodexAutoExecutor && existingCodexAutoExecutor.UsesConfig(cfg) {
 					return
 				}
 			}
@@ -567,11 +574,12 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	if ctx != nil && ctx.Err() != nil {
 		return true
 	}
+	cfg := s.currentConfig()
 	models := applyExcludedModels(result.Models, activeExcluded)
-	models = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	if len(models) > 0 {
-		models = applyOAuthSettingsForAuth(s.cfg, providerKey, activeAuthKind, models)
-		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		models = applyOAuthSettingsForAuth(cfg, providerKey, activeAuthKind, models)
+		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))
 		return true
 	}
 	GlobalModelRegistry().UnregisterClient(activeAuth.ID)
