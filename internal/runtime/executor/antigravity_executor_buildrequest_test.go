@@ -3,14 +3,20 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -201,6 +207,158 @@ func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *test
 	}
 	if got := explicitRequest["sessionId"]; got != "-987654321" {
 		t.Fatalf("explicit request.sessionId = %v, want -987654321", got)
+	}
+}
+
+func TestAntigravityExecutorConversationSession(t *testing.T) {
+	for _, route := range []struct {
+		name     string
+		model    string
+		stream   bool
+		wantPath string
+	}{
+		{name: "execute", model: "gemini-2.5-pro", wantPath: antigravityGeneratePath},
+		{name: "stream", model: "gemini-2.5-pro", stream: true, wantPath: antigravityStreamPath},
+		{name: "aggregated stream", model: "claude-sonnet-4-6", wantPath: antigravityStreamPath},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			headers := http.Header{
+				"X-Session-ID":      {"synthetic-caller-key-one"},
+				"X-Conversation-ID": {"synthetic-conversation-one"},
+			}
+			captureSession := func(headers http.Header, background string) string {
+				t.Helper()
+				payload, errMarshal := json.Marshal(map[string]any{
+					"model": route.model,
+					"messages": []map[string]string{
+						{"role": "system", "content": "stable system"},
+						{"role": "user", "content": background},
+					},
+				})
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				var captured []byte
+				stopAfterCapture := errors.New("synthetic transport stopped after capture")
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					if request.URL.Path != route.wantPath {
+						t.Fatalf("upstream path = %q, want %q", request.URL.Path, route.wantPath)
+					}
+					if request.Header.Get("X-Session-ID") != "" || request.Header.Get("X-Conversation-ID") != "" {
+						t.Fatal("client identity headers leaked upstream")
+					}
+					var errRead error
+					captured, errRead = io.ReadAll(request.Body)
+					if errClose := request.Body.Close(); errClose != nil {
+						t.Fatal(errClose)
+					}
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					return nil, stopAfterCapture
+				}))
+				auth := &cliproxyauth.Auth{Metadata: map[string]any{
+					"access_token": "synthetic-token",
+					"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+					"project_id":   "synthetic-project",
+				}}
+				req, opts := cliproxysession.Enrich(
+					cliproxyexecutor.Request{Model: route.model, Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Headers: headers, Stream: route.stream},
+				)
+				executor := NewAntigravityExecutor(&config.Config{})
+				var errExecute error
+				if route.stream {
+					_, errExecute = executor.ExecuteStream(ctx, auth, req, opts)
+				} else {
+					_, errExecute = executor.Execute(ctx, auth, req, opts)
+				}
+				if !errors.Is(errExecute, stopAfterCapture) {
+					t.Fatalf("executor error = %v, want captured transport error", errExecute)
+				}
+				for _, values := range headers {
+					if strings.Contains(string(captured), strings.TrimSpace(values[0])) {
+						t.Fatal("raw caller or conversation identity leaked into upstream body")
+					}
+				}
+				sessionID := gjson.GetBytes(captured, "request.sessionId").String()
+				want := helps.AntigravitySessionID(headers, opts.Metadata, req.Metadata)
+				if want == "" {
+					want = generateStableSessionID(captured)
+				}
+				if sessionID != want {
+					t.Fatalf("final upstream sessionId = %q, want %q", sessionID, want)
+				}
+				return sessionID
+			}
+			first := captureSession(headers, "dynamic background one")
+			if got := captureSession(headers, "dynamic background two"); got != first {
+				t.Fatal("changing payload text changed the same conversation session")
+			}
+			if got := captureSession(headers, "dynamic background one"); got != first {
+				t.Fatal("repeating an execution changed the conversation session")
+			}
+			changedConversation := headers.Clone()
+			changedConversation["X-Conversation-ID"] = []string{"synthetic-conversation-two"}
+			if got := captureSession(changedConversation, "dynamic background one"); got == first {
+				t.Fatal("different conversations shared an upstream session")
+			}
+			changedKey := headers.Clone()
+			changedKey["X-Session-ID"] = []string{"synthetic-caller-key-two"}
+			if got := captureSession(changedKey, "dynamic background one"); got == first {
+				t.Fatal("different caller keys shared an upstream conversation session")
+			}
+			keyOnly := http.Header{"X-Session-ID": {"synthetic-caller-key-one"}}
+			captureSession(keyOnly, "legacy background")
+		})
+	}
+}
+
+func TestAntigravityBuildRequestConversationSessionPrecedence(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{
+		"X-Session-ID":      {"synthetic-caller-key"},
+		"X-Conversation-ID": {"synthetic-conversation"},
+	}
+	for _, testCase := range []struct {
+		name    string
+		payload string
+		rules   config.PayloadConfig
+		want    string
+	}{
+		{name: "mapped conversation", payload: `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`, want: helps.AntigravitySessionID(headers)},
+		{name: "explicit body session", payload: `{"request":{"sessionId":"-123456789","contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`, want: "-123456789"},
+		{name: "payload override", payload: `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`, rules: config.PayloadConfig{
+			Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: map[string]any{"sessionId": "-987654321"}}},
+		}, want: "-987654321"},
+		{name: "payload filter", payload: `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`, rules: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: []string{"sessionId"}}},
+		}},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(testCase.name+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
+				cfg := &config.Config{Payload: testCase.rules}
+				executor := NewAntigravityExecutor(cfg)
+				auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "synthetic-project"}}
+				payload := []byte(testCase.payload)
+				req := cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Headers: headers}
+				ctx := helps.WithPayloadFinalizer(context.Background(), helps.NewPayloadFinalizer(cfg, "antigravity", req.Model, "antigravity", "request", payload, req, opts))
+				request, errBuild := executor.buildRequest(ctx, auth, "synthetic-token", req.Model, payload, stream, "", "https://example.invalid", helps.AntigravitySessionID(headers))
+				if errBuild != nil {
+					t.Fatal(errBuild)
+				}
+				body := requestBody(t, request)
+				encoded, errMarshal := json.Marshal(body)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				if got := gjson.GetBytes(encoded, "request.sessionId"); got.String() != testCase.want || (testCase.want == "" && got.Exists()) {
+					t.Fatalf("final sessionId = %s, want %q", got.Raw, testCase.want)
+				}
+			})
+		}
 	}
 }
 

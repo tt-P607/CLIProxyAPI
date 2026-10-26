@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -15,6 +16,66 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
+
+func TestAntigravityAuthModelCatalogUsesValidatedSnapshots(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+	for _, test := range []struct {
+		name          string
+		persisted     bool
+		disabled      bool
+		wrongProject  bool
+		wrongEndpoint bool
+		models        map[string]struct{}
+		wantKnown     bool
+	}{
+		{name: "unknown"},
+		{name: "empty", persisted: true, models: map[string]struct{}{}, wantKnown: true},
+		{name: "known", persisted: true, models: map[string]struct{}{"upstream-z": {}, "upstream-a": {}}, wantKnown: true},
+		{name: "disabled_snapshot", persisted: true, disabled: true, models: map[string]struct{}{"upstream-a": {}}, wantKnown: true},
+		{name: "other_project", persisted: true, wrongProject: true, models: map[string]struct{}{"upstream-a": {}}},
+		{name: "other_endpoint", persisted: true, wrongEndpoint: true, models: map[string]struct{}{"upstream-a": {}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := antigravityTestAuth("catalog-view-"+test.name, "http://127.0.0.1:1")
+			auth.Metadata["project_id"] = "catalog-project"
+			auth.Disabled = test.disabled
+			if test.persisted {
+				project, endpoint := "catalog-project", antigravityModelBaseURLs(auth)[0]
+				if test.wrongProject {
+					project = "other-project"
+				}
+				if test.wrongEndpoint {
+					endpoint = "http://127.0.0.1:2"
+				}
+				auth.Metadata[antigravityPersistedHintsMetaKey] = buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityModelCapabilityHints{ModelIDs: test.models})
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			current, errRegister := manager.Register(t.Context(), auth)
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			svc := &Service{cfg: &config.Config{}, coreManager: manager}
+			models, known := svc.authModelCatalog(current)
+			if known != test.wantKnown {
+				t.Fatalf("known=%v, want %v", known, test.wantKnown)
+			}
+			if known && len(models) != len(test.models) {
+				t.Fatalf("models=%v, want %v", models, test.models)
+			}
+			if !slices.IsSorted(models) {
+				t.Fatalf("catalog must be sorted: %v", models)
+			}
+			if len(models) > 0 {
+				models[0] = "mutated"
+				fresh, _ := svc.authModelCatalog(current)
+				if slices.Contains(fresh, "mutated") {
+					t.Fatal("model view mutated the cached catalog")
+				}
+			}
+		})
+	}
+}
 
 func TestAntigravityStaleAuthCannotRestoreExcludedModel(t *testing.T) {
 	resetAntigravityCapabilityCache()

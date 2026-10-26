@@ -34,6 +34,33 @@ func (s *memoryAuthStorage) SaveTokenToFile(authFilePath string) error {
 	return os.WriteFile(authFilePath, s.payload, 0o600)
 }
 
+func TestHostAuthEntryCatalogIsIndependentOfRegisteredModelsAndHealth(t *testing.T) {
+	auth := &coreauth.Auth{ID: "catalog-test", Provider: "antigravity", Attributes: map[string]string{"path": filepath.Join(t.TempDir(), "catalog.json")}, Unavailable: true}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "client-alias"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	host := New()
+	unknown := host.buildHostAuthFileEntry(auth)
+	if unknown.CatalogKnown || len(unknown.CatalogModelIDs) != 0 || len(unknown.RegisteredModelIDs) != 1 || unknown.RegisteredModelIDs[0] != "client-alias" {
+		t.Fatalf("unknown directory must not inherit registered IDs: %+v", unknown)
+	}
+	models := []string{"upstream-z", "upstream-a"}
+	host.SetAuthModelCatalog(func(*coreauth.Auth) ([]string, bool) { return models, true })
+	known := host.buildHostAuthFileEntry(auth)
+	if !known.CatalogKnown || len(known.CatalogModelIDs) != 2 || known.CatalogModelIDs[0] != "upstream-a" || !known.Unavailable {
+		t.Fatalf("catalog must be independent of health: %+v", known)
+	}
+	known.CatalogModelIDs[0] = "changed"
+	if models[0] != "upstream-z" || models[1] != "upstream-a" {
+		t.Fatal("catalog snapshot mutated the resolver's model IDs")
+	}
+	host.SetAuthModelCatalog(func(*coreauth.Auth) ([]string, bool) { return []string{}, true })
+	empty := host.buildHostAuthFileEntry(auth)
+	if !empty.CatalogKnown || len(empty.CatalogModelIDs) != 0 {
+		t.Fatalf("successful empty catalog must remain known: %+v", empty)
+	}
+}
+
 func TestHostAuthListCallbackUsesAuthManager(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "demo-a.json")
@@ -81,6 +108,31 @@ func TestHostAuthListCallbackUsesAuthManager(t *testing.T) {
 	entry := resp.Files[0]
 	if entry.AuthIndex != auth.Index || entry.Name != "demo-a.json" || entry.Email != "a@example.com" {
 		t.Fatalf("entry = %#v, want auth index and file metadata", entry)
+	}
+}
+
+func TestHostAuthRuntimeIncludesIndependentModelFailureState(t *testing.T) {
+	now := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	host := New()
+	auth := &coreauth.Auth{
+		ID: "synthetic-auth", Provider: "antigravity",
+		Attributes: map[string]string{"path": filepath.Join(t.TempDir(), "synthetic.json")},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gemini-model":  {Unavailable: true, NextRetryAfter: now.Add(time.Hour), UpdatedAt: now, LastError: &coreauth.Error{HTTPStatus: 403, Message: "synthetic forbidden"}},
+			"missing-state": nil,
+		},
+	}
+	entry := host.buildHostAuthFileEntry(auth)
+	if entry == nil || len(entry.ModelStates) != 1 {
+		t.Fatalf("runtime model snapshot=%+v", entry)
+	}
+	state := entry.ModelStates["gemini-model"]
+	if state.HTTPStatus != 403 || state.Message != "synthetic forbidden" || !state.Unavailable || !state.NextRetryAfter.Equal(now.Add(time.Hour)) || !state.UpdatedAt.Equal(now) {
+		t.Fatalf("runtime state=%+v", state)
+	}
+	auth.ModelStates["gemini-model"].LastError.Message = "changed"
+	if entry.ModelStates["gemini-model"].Message != "synthetic forbidden" {
+		t.Fatal("runtime snapshot aliases mutable auth state")
 	}
 }
 

@@ -3,12 +3,14 @@ package helps
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 // DerivedSessionID returns the first context-derived session identity in metadata order.
@@ -53,6 +55,31 @@ func DerivedAntigravitySessionID(metadataSets ...map[string]any) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte("cli-proxy-api:antigravity:derived-session\x00" + derivedID))
+	value := int64(binary.BigEndian.Uint64(sum[:8])) & 0x7FFFFFFFFFFFFFFF
+	return "-" + strconv.FormatInt(value, 10)
+}
+
+func AntigravitySessionID(headers http.Header, metadataSets ...map[string]any) string {
+	conversationID := ""
+	headerCount := 0
+	for name, values := range headers {
+		if !strings.EqualFold(name, "X-Conversation-ID") {
+			continue
+		}
+		headerCount++
+		if headerCount > 1 || len(values) != 1 {
+			return DerivedAntigravitySessionID(metadataSets...)
+		}
+		conversationID = cliproxysession.NormalizeExplicitID(values[0])
+	}
+	if conversationID == "" {
+		return DerivedAntigravitySessionID(metadataSets...)
+	}
+	fingerprint := cliproxyusage.RequestFingerprintFromContext(cliproxyusage.WithRequestFingerprint(nil, headers))
+	if fingerprint == "" {
+		return DerivedAntigravitySessionID(metadataSets...)
+	}
+	sum := sha256.Sum256([]byte("cli-proxy-api:antigravity:conversation\x00" + fingerprint + "\x00" + conversationID))
 	value := int64(binary.BigEndian.Uint64(sum[:8])) & 0x7FFFFFFFFFFFFFFF
 	return "-" + strconv.FormatInt(value, 10)
 }

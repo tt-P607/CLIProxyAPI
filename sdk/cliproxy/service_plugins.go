@@ -110,6 +110,7 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	}
 
 	if s.pluginHost != nil {
+		s.pluginHost.SetAuthModelCatalog(s.authModelCatalog)
 		s.pluginHost.ApplyConfig(ctx, cfg)
 	}
 	if errContext := ctx.Err(); errContext != nil {

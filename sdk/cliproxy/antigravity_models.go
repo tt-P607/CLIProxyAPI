@@ -99,6 +99,26 @@ type antigravityModelCapabilityHints struct {
 	revision uint64
 }
 
+func (s *Service) authModelCatalog(auth *coreauth.Auth) ([]string, bool) {
+	if auth == nil || auth.Provider != "antigravity" {
+		return nil, false
+	}
+	hints := s.cachedAntigravityHints(auth)
+	if hints.ModelIDs == nil && auth.Disabled {
+		project, _ := auth.Metadata["project_id"].(string)
+		hints, _ = parsePersistedAntigravityCapabilityHints(auth.Metadata, project, antigravityModelBaseURLs(auth)[0])
+	}
+	if hints.ModelIDs == nil {
+		return nil, false
+	}
+	models := make([]string, 0, len(hints.ModelIDs))
+	for model := range hints.ModelIDs {
+		models = append(models, model)
+	}
+	slices.Sort(models)
+	return models, true
+}
+
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
 	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
 }

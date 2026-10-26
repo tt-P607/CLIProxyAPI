@@ -130,6 +130,29 @@ The embedded server calls this automatically for built‑in providers; for custo
   ```
 - For raw HTTP flows, implement `PrepareRequest` and/or call `Manager.InjectCredentials(req, authID)` to set headers.
 
+## Antigravity Conversation Identity
+
+Antigravity generation can use a conversation identity independently of key-level credential affinity. Supply both `X-Session-ID` (the caller's key-level binding identity) and `X-Conversation-ID` in incoming HTTP headers or executor `Options.Headers`.
+
+Clients must preserve the conversation identifier across turns, tool continuations, retries and restoration. Separate conversations need separate identifiers; do not use a per-request ID or a single global value. The conversation identifier must be one non-empty printable value of at most 256 bytes. Header names are case-insensitive and surrounding spaces are ignored. Duplicate headers or multiple values do not enable conversation mapping.
+
+For a new-api channel forwarding to CLIProxyAPI, merge these entries into its existing header override configuration:
+
+```json
+{
+  "X-Session-ID": "{client_header:authorization}",
+  "X-Conversation-ID": "{client_header:x-conversation-id}"
+}
+```
+
+The relay forwards the client's conversation identifier; it does not create one. A missing client header is omitted by new-api.
+
+CLIProxyAPI maps the existing key fingerprint and conversation identifier to a provider-scoped negative decimal `request.sessionId`, independent of message text. The same key and conversation produce the same mapping; different conversations or caller keys have separate scopes. The mapped value contains neither raw identity. The affinity plugin's binding key and cumulative usage attribution remain unchanged.
+
+This applies to streaming generation, non-streaming generation and streaming responses aggregated into a non-streaming response. Explicit `request.sessionId` in the translated payload retains precedence. User payload rules run after built-in session injection and may override or filter it. Image and standalone web-search requests retain their existing behavior.
+
+Without both valid headers, existing derived-session and payload-based session behavior remains unchanged. Stable identity does not guarantee prompt-cache retention: common prompt prefixes must remain stable, and upstream implicit caching remains best-effort.
+
 ## Testing Tips
 
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`

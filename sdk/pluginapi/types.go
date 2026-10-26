@@ -830,7 +830,19 @@ type HostAuthFileEntry struct {
 	// Failed is the recent failure count.
 	Failed int64 `json:"failed,omitempty"`
 	// RecentRequests is the recent request snapshot.
-	RecentRequests []HostRecentRequestEntry `json:"recent_requests,omitempty"`
+	RecentRequests     []HostRecentRequestEntry      `json:"recent_requests,omitempty"`
+	ModelStates        map[string]HostAuthModelState `json:"model_states,omitempty"`
+	CatalogKnown       bool                          `json:"catalog_known"`
+	CatalogModelIDs    []string                      `json:"catalog_model_ids,omitempty"`
+	RegisteredModelIDs []string                      `json:"registered_model_ids,omitempty"`
+}
+
+type HostAuthModelState struct {
+	Unavailable    bool      `json:"unavailable,omitempty"`
+	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	HTTPStatus     int       `json:"http_status,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 }
 
 // HostAuthGetRequest asks the host for credential JSON by auth index.

@@ -52,6 +52,15 @@ func (h *Host) currentAuthManager() *coreauth.Manager {
 	return manager
 }
 
+func (h *Host) SetAuthModelCatalog(resolver func(*coreauth.Auth) ([]string, bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.authModelCatalog = resolver
+	h.mu.Unlock()
+}
+
 func (h *Host) callHostAuthList(ctx context.Context, request []byte) ([]byte, error) {
 	_ = ctx
 	if len(bytesTrimSpace(request)) > 0 {
@@ -725,6 +734,42 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		Success:        auth.Success,
 		Failed:         auth.Failed,
 		RecentRequests: hostRecentRequests(auth),
+	}
+	h.mu.Lock()
+	resolveCatalog := h.authModelCatalog
+	h.mu.Unlock()
+	if resolveCatalog != nil {
+		models, known := resolveCatalog(auth)
+		entry.CatalogKnown = known
+		if known {
+			entry.CatalogModelIDs = append([]string(nil), models...)
+			sort.Strings(entry.CatalogModelIDs)
+		}
+	}
+	for _, model := range registry.GetGlobalRegistry().GetModelsForClient(auth.ID) {
+		if model != nil && model.ID != "" {
+			entry.RegisteredModelIDs = append(entry.RegisteredModelIDs, model.ID)
+		}
+	}
+	sort.Strings(entry.RegisteredModelIDs)
+	if len(auth.ModelStates) > 0 {
+		entry.ModelStates = make(map[string]pluginapi.HostAuthModelState, len(auth.ModelStates))
+		for model, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			modelState := pluginapi.HostAuthModelState{
+				Unavailable:    state.Unavailable,
+				NextRetryAfter: state.NextRetryAfter,
+				Message:        state.StatusMessage,
+				UpdatedAt:      state.UpdatedAt,
+			}
+			if state.LastError != nil {
+				modelState.HTTPStatus = state.LastError.HTTPStatus
+				modelState.Message = state.LastError.Message
+			}
+			entry.ModelStates[model] = modelState
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry.Email = email
