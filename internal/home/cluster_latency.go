@@ -291,6 +291,10 @@ func (c *Client) probeClusterLatency(ctx context.Context, address string) (time.
 		if errDial != nil {
 			return nil, errDial
 		}
+		if ctx.Err() != nil {
+			_ = closeUnderlyingTransport(conn)
+			return nil, context.Cause(ctx)
+		}
 		return newPluginSyncCancelableConn(ctx, conn), nil
 	}
 	probe := redis.NewClient(options)

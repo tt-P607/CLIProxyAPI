@@ -65,6 +65,10 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 		if errDial != nil {
 			return nil, errDial
 		}
+		if ctx.Err() != nil {
+			_ = closeUnderlyingTransport(conn)
+			return nil, context.Cause(ctx)
+		}
 		return newPluginSyncCancelableConn(ctx, conn), nil
 	}
 	command := redis.NewClient(options)
