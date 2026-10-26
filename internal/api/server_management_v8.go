@@ -37,6 +37,10 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/logs/errors", s.mgmt.GetRequestErrorLogs)
 	v8.GET("/observability/logs/errors/:name", s.mgmt.DownloadRequestErrorLog)
 	v8.GET("/observability/logs/requests/:id", s.mgmt.GetRequestLogByID)
+	v8.GET("/observability/usage", s.mgmt.GetUsageStatistics)
+	v8.GET("/observability/usage/export", s.mgmt.ExportUsageStatistics)
+	v8.POST("/observability/usage/import", s.mgmt.ImportUsageStatistics)
+	v8.POST("/observability/usage/reset", s.mgmt.ResetAllStatistics)
 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 
@@ -47,6 +51,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/credentials/download", s.mgmt.DownloadAuthFile)
 	v8.PATCH("/credentials/status", s.mgmt.PatchAuthFileStatus)
 	v8.PATCH("/credentials/fields", s.mgmt.PatchAuthFileFields)
+	v8.POST("/credentials/test", s.mgmt.TestAuthFile)
 	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)

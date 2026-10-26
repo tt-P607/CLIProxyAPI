@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usage"
 )
 
 func TestManagementV8RoutesShareAccessControl(t *testing.T) {
@@ -45,7 +46,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 			s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
 			s.managementRoutesEnabled.Store(tc.enabled)
 			s.registerManagementRoutes()
-			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins"} {
+			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins", "/v8/management/observability/usage"} {
 				req := httptest.NewRequest(http.MethodGet, route, nil)
 				req.RemoteAddr = "127.0.0.1:1234"
 				if tc.authorized {
@@ -74,6 +75,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 	cfg.AuthDir = t.TempDir()
 	h := management.NewHandler(cfg, path, nil)
 	h.SetLocalPassword("test-password")
+	h.SetUsageStatistics(usage.NewRequestStatistics())
 	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
 	s.managementRoutesEnabled.Store(true)
 	s.registerManagementRoutes()
@@ -88,7 +90,10 @@ func TestManagementV8IndependentContract(t *testing.T) {
 	for _, route := range []string{
 		"GET /v0/management/debug", "PUT /v0/management/request-retry", "GET /v0/management/auth-files",
 		"GET /v8/management/observability/logs", "GET /v8/management/observability/usage/queue",
+		"GET /v8/management/observability/usage", "GET /v8/management/observability/usage/export",
+		"POST /v8/management/observability/usage/import", "POST /v8/management/observability/usage/reset",
 		"GET /v8/management/credentials", "POST /v8/management/credentials",
+		"POST /v8/management/credentials/test",
 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
 		"POST /v8/management/routing/cooldown/reset",
 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
@@ -109,6 +114,18 @@ func TestManagementV8IndependentContract(t *testing.T) {
 			t.Fatalf("%s %s: status=%d body=%s", method, url, response.Code, response.Body.String())
 		}
 		return strings.TrimSpace(response.Body.String())
+	}
+	request(http.MethodPost, "/v8/management/observability/usage/import", `{"version":1,"usage":{"apis":{"fixture":{"models":{"gemini-test":{"details":[{"timestamp":"2026-10-26T00:00:00Z","tokens":{"input_tokens":100,"output_tokens":23,"total_tokens":123}}]}}}}}}`, http.StatusOK)
+	for _, route := range []string{"/v8/management/observability/usage", "/v8/management/observability/usage/export"} {
+		var payload struct {
+			Usage usage.StatisticsSnapshot `json:"usage"`
+		}
+		if errDecode := json.Unmarshal([]byte(request(http.MethodGet, route, "", http.StatusOK)), &payload); errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		if payload.Usage.TotalRequests != 1 || payload.Usage.TotalTokens != 123 || payload.Usage.APIs["fixture"].Models["gemini-test"].TotalTokens != 123 {
+			t.Fatalf("%s did not preserve stored usage: %+v", route, payload.Usage)
+		}
 	}
 	for _, legacy := range []string{"debug", "request-retry", "api-keys", "codex-api-key", "auth-files", "codex-auth-url", "oauth/providers/codex/auth-url", "plugins/test-plugin/config"} {
 		request(http.MethodGet, "/v8/management/"+legacy, "", http.StatusNotFound)
