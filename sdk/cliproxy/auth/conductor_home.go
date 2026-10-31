@@ -1397,6 +1397,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 	if !m.localExecutionAllowed() {
 		return cliproxyexecutor.Response{}, false, nil
 	}
+	quotaRecovery := quotaRecoveryFromContext(ctx)
 	routeModel := req.Model
 	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, opts)
 	if errCandidates != nil {
@@ -1430,8 +1431,12 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
+			if errRecovery := quotaRecovery.begin(creditsCtx); errRecovery != nil {
+				return cliproxyexecutor.Response{}, false, errRecovery
+			}
 			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			quotaRecovery.observe(c.provider, errExec)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)

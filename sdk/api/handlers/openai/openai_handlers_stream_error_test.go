@@ -242,3 +242,132 @@ func TestCompletionsHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testi
 		t.Fatalf("missing SSE JSON error payload after keepalive: %q", body)
 	}
 }
+
+type quotaRecoveryHTTPExecutor struct {
+	mu     sync.Mutex
+	calls  []string
+	stages []string
+}
+
+func (*quotaRecoveryHTTPExecutor) Identifier() string { return "antigravity" }
+
+func (e *quotaRecoveryHTTPExecutor) Execute(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, auth.ID)
+	e.stages = append(e.stages, "execute")
+	e.mu.Unlock()
+	return coreexecutor.Response{}, antigravityQuotaRecoveryHTTPError()
+}
+
+func (e *quotaRecoveryHTTPExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, auth.ID)
+	e.stages = append(e.stages, "bootstrap")
+	e.mu.Unlock()
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Err: antigravityQuotaRecoveryHTTPError()}
+	close(chunks)
+	return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Account": {"private-account-marker"}}, Chunks: chunks}, nil
+}
+
+func (*quotaRecoveryHTTPExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (*quotaRecoveryHTTPExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (*quotaRecoveryHTTPExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func antigravityQuotaRecoveryHTTPError() error {
+	return &coreauth.Error{
+		HTTPStatus: http.StatusTooManyRequests,
+		Message:    `{"error":{"code":429,"message":"private-account-marker","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`,
+	}
+}
+
+func TestOpenAIHandlersQuotaRecoveryIsBoundedAndSanitized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, endpoint := range []string{"chat", "responses"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, stream), func(t *testing.T) {
+				executor := &quotaRecoveryHTTPExecutor{}
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.SetRetryConfig(8, 0, 0)
+				manager.RegisterExecutor(executor)
+
+				model := fmt.Sprintf("antigravity-quota-recovery-%s-%v", endpoint, stream)
+				for index := 0; index < 6; index++ {
+					authID := fmt.Sprintf("%s-auth-%d", model, index)
+					registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+					if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}); errRegister != nil {
+						t.Fatalf("register auth: %v", errRegister)
+					}
+				}
+
+				body := fmt.Sprintf(`{"model":%q,"stream":%v`, model, stream)
+				if endpoint == "chat" {
+					body += `,"messages":[{"role":"user","content":"hi"}]}`
+				} else {
+					body += `,"input":"hi"}`
+				}
+
+				base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+					Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 5},
+				}, manager)
+				router := gin.New()
+				if endpoint == "chat" {
+					router.POST("/v1/chat/completions", NewOpenAIAPIHandler(base).ChatCompletions)
+				} else {
+					router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
+				}
+
+				path := "/v1/chat/completions"
+				if endpoint == "responses" {
+					path = "/v1/responses"
+				}
+				request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+				request.Header.Set("Content-Type", "application/json")
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, request)
+
+				responseBody := recorder.Body.String()
+				if recorder.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want 503; body=%q", recorder.Code, responseBody)
+				}
+				if !strings.Contains(responseBody, "upstream_quota_exhausted") {
+					t.Fatalf("response lacks sanitized quota error code: %q", responseBody)
+				}
+				if !strings.Contains(responseBody, "当前模型可用额度不足，自动恢复未能完成请求，请稍后重试。") {
+					t.Fatalf("response lacks the safe quota recovery message: %q", responseBody)
+				}
+				if strings.Contains(responseBody, "private-account-marker") || strings.Contains(responseBody, "QUOTA_EXHAUSTED") {
+					t.Fatalf("response leaked upstream quota details: %q", responseBody)
+				}
+				if recorder.Header().Get("Retry-After") != "" || recorder.Header().Get("X-Goog-Request-Info") != "" || recorder.Header().Get("X-Upstream-Account") != "" {
+					t.Fatalf("response forwarded upstream headers: %v", recorder.Header())
+				}
+
+				executor.mu.Lock()
+				calls := len(executor.calls)
+				stages := append([]string(nil), executor.stages...)
+				executor.mu.Unlock()
+				if calls != 4 {
+					t.Fatalf("executor calls = %d, want initial attempt plus three recovery attempts; stages=%v", calls, stages)
+				}
+				if stream {
+					for _, stage := range stages {
+						if stage != "bootstrap" {
+							t.Fatalf("stream request used unexpected executor stage %q; stages=%v", stage, stages)
+						}
+					}
+				}
+			})
+		}
+	}
+}

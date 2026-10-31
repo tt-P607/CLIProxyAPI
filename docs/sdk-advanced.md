@@ -153,6 +153,16 @@ This applies to streaming generation, non-streaming generation and streaming res
 
 Without both valid headers, existing derived-session and payload-based session behavior remains unchanged. Stable identity does not guarantee prompt-cache retention: common prompt prefixes must remain stable, and upstream implicit caching remains best-effort.
 
+## Antigravity Quota Recovery
+
+Local Antigravity generation treats an explicit quota-exhausted HTTP 429 separately from transient rate limits. After the first quota failure, the request has a shared budget of at most three additional execution attempts across credential failover, configured credits fallback, and existing authorization recovery. This budget takes precedence over the ordinary credential retry limit for that request; it is not multiplied by request retry rounds or streaming bootstrap retries.
+
+Recovery preserves the requested model and credential cooldowns. It does not enable paid credits automatically, reactivate disabled credentials, or repeatedly call credentials whose quota is already exhausted. When no eligible execution target remains, recovery ends before consuming the full budget.
+
+If recovery succeeds, the client receives the normal response. Otherwise, quota failures and their cached cooldown errors return HTTP 503 with a generic Chinese message identified by `upstream_quota_exhausted`, without upstream account details or headers. Caller cancellation and subsequent invalid-request errors retain their own meaning. Ordinary rate limits and other providers retain their existing behavior.
+
+Streaming recovery is limited to failures before the first payload. An exhausted-quota error after output has begun is sanitized within the stream, but the response is never replayed.
+
 ## Testing Tips
 
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`
