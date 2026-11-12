@@ -12,7 +12,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
-func TestGeminiUsageBudgetAggregatesWindowsAndFiltersHistory(t *testing.T) {
+func TestKeyUsageBudgetAggregatesWindowsAndFiltersHistory(t *testing.T) {
 	stats := NewRequestStatistics()
 	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	const ownKey = "synthetic-own-api-key"
@@ -48,7 +48,7 @@ func TestGeminiUsageBudgetAggregatesWindowsAndFiltersHistory(t *testing.T) {
 		"ag-own":   {"gemini-alias": "gemini-3.8-flash"},
 		"ag-other": {},
 	}
-	got := stats.GeminiUsageBudget(now, aliases)
+	got := stats.KeyUsageBudget(now, aliases, []string{"gemini-"})
 	if !got.GeneratedAt.Equal(now) || !got.StartedAt.Equal(start) {
 		t.Fatalf("times = generated %v started %v", got.GeneratedAt, got.StartedAt)
 	}
@@ -73,14 +73,42 @@ func TestGeminiUsageBudgetAggregatesWindowsAndFiltersHistory(t *testing.T) {
 	}
 }
 
-func TestGeminiUsageBudgetEmptyAndZeroTime(t *testing.T) {
+func TestKeyUsageBudgetEmptyAndZeroTime(t *testing.T) {
 	stats := NewRequestStatistics()
-	if got := stats.GeminiUsageBudget(time.Time{}, nil); !got.GeneratedAt.IsZero() || got.Keys == nil {
+	if got := stats.KeyUsageBudget(time.Time{}, nil, nil); !got.GeneratedAt.IsZero() || got.Keys == nil {
 		t.Fatalf("zero-time result = %+v", got)
 	}
 	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
-	if got := stats.GeminiUsageBudget(now, nil); !got.GeneratedAt.Equal(now) || !got.StartedAt.IsZero() || len(got.Keys) != 0 {
+	if got := stats.KeyUsageBudget(now, nil, nil); !got.GeneratedAt.Equal(now) || !got.StartedAt.IsZero() || len(got.Keys) != 0 {
 		t.Fatalf("empty result = %+v", got)
+	}
+}
+
+func TestKeyUsageBudgetUsesCallerModelFilters(t *testing.T) {
+	stats := NewRequestStatistics()
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	for model, tokens := range map[string]int64{"gemini-test": 10, "claude-test": 20, "team-alias": 30} {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey: "synthetic-key", Model: model, AuthIndex: "selected-auth", RequestedAt: now,
+			Detail: coreusage.Detail{TotalTokens: tokens},
+		})
+	}
+	aliases := map[string]map[string]string{"selected-auth": {"team-alias": "claude-test"}}
+	for _, test := range []struct {
+		name     string
+		prefixes []string
+		want     int64
+	}{
+		{name: "non-Gemini models and aliases", prefixes: []string{" CLAUDE- "}, want: 50},
+		{name: "multiple families", prefixes: []string{"gemini-", "claude-"}, want: 60},
+		{name: "all models", want: 60},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := stats.KeyUsageBudget(now, aliases, test.prefixes)
+			if len(got.Keys) != 1 || got.Keys[0].Tokens5h != test.want || got.Keys[0].Tokens24h != test.want || got.Keys[0].Tokens7d != test.want {
+				t.Fatalf("result = %+v, want %d tokens in each window", got, test.want)
+			}
+		})
 	}
 }
 

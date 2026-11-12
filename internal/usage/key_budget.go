@@ -23,9 +23,9 @@ type UsageBudget struct {
 	Keys        []KeyBudget `json:"keys"`
 }
 
-// GeminiUsageBudget aggregates visible Gemini usage associated with the given
-// Antigravity auth indexes. Model aliases must map to Gemini model names.
-func (s *RequestStatistics) GeminiUsageBudget(now time.Time, authAliases map[string]map[string]string) UsageBudget {
+// KeyUsageBudget aggregates usage for the given auth indexes and model prefixes.
+// An empty prefix list includes every model; aliases resolve to provider-native names.
+func (s *RequestStatistics) KeyUsageBudget(now time.Time, authAliases map[string]map[string]string, modelPrefixes []string) UsageBudget {
 	result := UsageBudget{GeneratedAt: now, Keys: []KeyBudget{}}
 	if s == nil || now.IsZero() {
 		return result
@@ -54,7 +54,7 @@ func (s *RequestStatistics) GeminiUsageBudget(now time.Time, authAliases map[str
 			}
 			for _, detail := range model.Details {
 				authModelAliases, eligibleAuth := authAliases[detail.AuthIndex]
-				if !eligibleAuth || !isGeminiBudgetModel(modelName, authModelAliases) || detail.Timestamp.IsZero() || detail.Timestamp.After(now) {
+				if !eligibleAuth || !matchesBudgetModel(modelName, authModelAliases, modelPrefixes) || detail.Timestamp.IsZero() || detail.Timestamp.After(now) {
 					continue
 				}
 				if result.StartedAt.IsZero() || detail.Timestamp.Before(result.StartedAt) {
@@ -99,13 +99,19 @@ func (s *RequestStatistics) GeminiUsageBudget(now time.Time, authAliases map[str
 	return result
 }
 
-func isGeminiBudgetModel(model string, aliases map[string]string) bool {
-	model = normalizeBudgetModelName(model)
-	if strings.HasPrefix(strings.ToLower(model), "gemini-") {
+func matchesBudgetModel(model string, aliases map[string]string, prefixes []string) bool {
+	if len(prefixes) == 0 {
 		return true
 	}
-	canonical, ok := aliases[strings.ToLower(model)]
-	return ok && strings.HasPrefix(strings.ToLower(normalizeBudgetModelName(canonical)), "gemini-")
+	model = strings.ToLower(normalizeBudgetModelName(model))
+	canonical := strings.ToLower(normalizeBudgetModelName(aliases[model]))
+	for _, prefix := range prefixes {
+		prefix = strings.ToLower(strings.TrimSpace(prefix))
+		if strings.HasPrefix(model, prefix) || strings.HasPrefix(canonical, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeBudgetModelName(model string) string {

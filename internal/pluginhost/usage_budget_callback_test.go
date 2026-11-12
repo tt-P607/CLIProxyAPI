@@ -41,6 +41,10 @@ func TestHostUsageBudgetCallFromPlugin(t *testing.T) {
 		APIKey: apiKey, Model: "gemini-3.8-flash", AuthIndex: otherAuth.Index, RequestedAt: time.Now().UTC().Add(-time.Hour),
 		Detail: coreusage.Detail{TotalTokens: 1000},
 	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey: apiKey, Model: "claude-test", AuthIndex: registered.Index, RequestedAt: time.Now().UTC().Add(-time.Hour),
+		Detail: coreusage.Detail{TotalTokens: 7},
+	})
 	host.SetAuthManager(manager)
 
 	raw, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostUsageBudget, []byte(`{}`))
@@ -64,7 +68,40 @@ func TestHostUsageBudgetCallFromPlugin(t *testing.T) {
 	if strings.Contains(string(raw), apiKey) {
 		t.Fatal("callback response exposed a raw API key")
 	}
+	for _, test := range []struct {
+		name    string
+		request string
+		want    int64
+	}{
+		{name: "explicit plugin filter", request: `{"provider":"antigravity","model_prefixes":["gemini-"]}`, want: 42},
+		{name: "other provider", request: `{"provider":" CLAUDE "}`, want: 1000},
+		{name: "all provider models", request: `{"provider":"antigravity"}`, want: 49},
+		{name: "other model family", request: `{"provider":"antigravity","model_prefixes":["claude-"]}`, want: 7},
+		{name: "all providers", request: `{"provider":""}`, want: 1049},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostUsageBudget, []byte(test.request))
+			if errCall != nil {
+				t.Fatal(errCall)
+			}
+			if errDecode := json.Unmarshal(raw, &envelope); errDecode != nil || !envelope.OK {
+				t.Fatalf("invalid callback envelope: %v", errDecode)
+			}
+			if errDecode := json.Unmarshal(envelope.Result, &result); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if len(result.Keys) != 1 || result.Keys[0].Tokens5h != test.want || result.Keys[0].Tokens24h != test.want || result.Keys[0].Tokens7d != test.want {
+				t.Fatalf("result = %+v, want %d tokens in each window", result, test.want)
+			}
+			if strings.Contains(string(raw), apiKey) {
+				t.Fatal("callback response exposed a raw API key")
+			}
+		})
+	}
 	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostUsageBudget, []byte(`{`)); errCall == nil {
 		t.Fatal("malformed callback request should be rejected")
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostUsageBudget, []byte(`{"model_prefixes":[" "]}`)); errCall == nil {
+		t.Fatal("blank model prefix should be rejected")
 	}
 }

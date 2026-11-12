@@ -165,6 +165,18 @@ Streaming recovery is limited to failures before the first payload. An upstream 
 
 Trusted administrative callers can use `Manager.ExecuteForDiagnostics` to retain original errors and status codes. The authenticated management credential test uses this entry point and identifies local model cooldowns with `error_source: "local_cooldown"`, preserving reset information and the previous upstream error. Diagnostic execution still respects pinned credentials, disabled credentials, cooldowns, and the shared recovery budget. Public API execution does not enable this behavior through request headers or metadata.
 
+## Plugin Usage Summaries
+
+`host.usage.budget` returns read-only per-key token totals over rolling 5-hour, 24-hour and 7-day windows. Plugins select the credential provider and model-name prefixes in the request:
+
+```json
+{"provider":"antigravity","model_prefixes":["gemini-"]}
+```
+
+Provider and prefix matching are case-insensitive. Model aliases are resolved against each credential's configured mappings. An explicit empty provider selects all providers; an omitted or empty prefix list selects all models. An entirely empty request retains the Antigravity/Gemini filter for existing plugin binaries. Invalid blank prefixes return an error.
+
+The response contains `generated_at`, `started_at` and `keys`, whose entries contain `fingerprint`, `tokens_5h`, `tokens_24h` and `tokens_7d`. Fingerprints are SHA-256 digests of authenticated client API keys; raw keys are not returned. Plugins own quota policies, reserves and self/shared-channel classification; the host only summarizes observed usage.
+
 ## Testing Tips
 
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`
