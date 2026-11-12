@@ -14,7 +14,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+type credentialTestScheduler struct{}
+
+func (credentialTestScheduler) PickAuth(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	if req.Diagnostic {
+		return pluginapi.SchedulerPickResponse{}, false, nil
+	}
+	return pluginapi.SchedulerPickResponse{
+		Handled: true, Reject: true, RejectCode: "quota_account_unavailable", RejectReason: "ordinary requests remain isolated",
+	}, true, nil
+}
 
 type credentialTestExecutor struct {
 	failure error
@@ -59,6 +71,7 @@ func TestAuthFileTestPreservesDiagnosticErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
 			manager.SetRetryConfig(0, 0, 1)
+			manager.SetPluginScheduler(credentialTestScheduler{})
 			executor := &credentialTestExecutor{}
 			if test.status != 200 {
 				executor.failure = &coreauth.Error{HTTPStatus: test.status, Message: fmt.Sprintf(`{"error":{"code":%d,"message":"private diagnostic marker","details":[{"reason":%q}]}}`, test.status, test.reason)}

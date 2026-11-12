@@ -589,6 +589,9 @@ type SchedulerPickRequest struct {
 	Model string
 	// Stream reports whether the request expects streaming output.
 	Stream bool
+	// Diagnostic identifies trusted administrative execution set by the host,
+	// not by client headers or metadata. Scheduling plugins should delegate it.
+	Diagnostic bool
 	// Options contains request-scoped scheduler inputs.
 	Options SchedulerOptions
 	// Candidates contains auth records available for selection.

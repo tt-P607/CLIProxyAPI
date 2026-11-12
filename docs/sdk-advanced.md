@@ -165,6 +165,8 @@ Streaming recovery is limited to failures before the first payload. An upstream 
 
 Trusted administrative callers can use `Manager.ExecuteForDiagnostics` to retain original errors and status codes. The authenticated management credential test uses this entry point and identifies local model cooldowns with `error_source: "local_cooldown"`, preserving reset information and the previous upstream error. Diagnostic execution still respects pinned credentials, disabled credentials, cooldowns, and the shared recovery budget. Public API execution does not enable this behavior through request headers or metadata.
 
+Scheduler requests carry a host-generated `Diagnostic` flag for this entry point. Scheduling plugins should return an unhandled response for diagnostics, leaving selection of the pinned credential to the host rather than applying plugin-owned isolation, quota reserves, or affinity rules. The flag is derived from internal execution context, not client headers or metadata. Delegating a diagnostic request does not itself clear stored isolation or consume a recovery probe.
+
 ## Plugin Usage Summaries
 
 `host.usage.budget` returns read-only per-key token totals over rolling 5-hour, 24-hour and 7-day windows. Plugins select the credential provider and model-name prefixes in the request:

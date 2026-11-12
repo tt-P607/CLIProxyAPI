@@ -1323,11 +1323,13 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if providerKey == "mixed" {
 		requestProvider = ""
 	}
+	recovery := quotaRecoveryFromContext(ctx)
 	req := pluginapi.SchedulerPickRequest{
 		Provider:   requestProvider,
 		Providers:  schedulerProviders(providerKey, providers),
 		Model:      model,
 		Stream:     opts.Stream,
+		Diagnostic: recovery != nil && recovery.diagnostic,
 		Options:    schedulerOptions(opts),
 		Candidates: schedulerAuthCandidates(candidates),
 	}

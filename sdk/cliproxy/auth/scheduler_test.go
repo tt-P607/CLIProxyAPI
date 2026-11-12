@@ -1834,6 +1834,75 @@ func TestManagerPluginSchedulerSnapshotConsistencyAcrossSwap(t *testing.T) {
 	}
 }
 
+func TestManagerPluginSchedulerDiagnosticExecution(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		diagnostic bool
+		forged     bool
+	}{
+		{name: "management diagnostic", diagnostic: true},
+		{name: "ordinary pinned request"},
+		{name: "client-supplied diagnostic hints", forged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const provider = "antigravity"
+			const model = "diagnostic-scheduler-model"
+			const selectedID = "diagnostic-selected"
+			registerSchedulerModels(t, provider, model, selectedID, "diagnostic-other")
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.SetRetryConfig(0, 0, 1)
+			manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
+			for _, authID := range []string{selectedID, "diagnostic-other"} {
+				if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: provider}); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+			}
+			scheduler := &fakePluginScheduler{pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				if req.Diagnostic != test.diagnostic {
+					t.Fatalf("Diagnostic = %t, want %t", req.Diagnostic, test.diagnostic)
+				}
+				if len(req.Candidates) != 1 || req.Candidates[0].ID != selectedID {
+					t.Fatalf("diagnostic/pinned candidates = %+v, want only selected credential", req.Candidates)
+				}
+				if req.Diagnostic {
+					return pluginapi.SchedulerPickResponse{}, false, nil
+				}
+				return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectCode: "quota_account_unavailable", RejectReason: "ordinary requests remain isolated"}, true, nil
+			}}
+			manager.SetPluginScheduler(scheduler)
+			var selected string
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{
+				cliproxyexecutor.PinnedAuthMetadataKey: selectedID,
+				cliproxyexecutor.SelectedAuthCallbackMetadataKey: func(authID string) {
+					selected = authID
+				},
+			}}
+			if test.forged {
+				opts.Headers = http.Header{"X-Diagnostic": {"true"}}
+				opts.Metadata["diagnostic"] = true
+				opts.Metadata["Diagnostic"] = true
+			}
+			req := cliproxyexecutor.Request{Model: model}
+			var errExecute error
+			if test.diagnostic {
+				_, errExecute = manager.ExecuteForDiagnostics(context.Background(), []string{provider}, req, opts)
+			} else {
+				_, errExecute = manager.Execute(context.Background(), []string{provider}, req, opts)
+			}
+			if test.diagnostic {
+				if errExecute != nil || selected != selectedID {
+					t.Fatalf("diagnostic execution: selected=%q error=%v", selected, errExecute)
+				}
+			} else if errExecute == nil || selected != "" {
+				t.Fatalf("ordinary execution escaped isolation: selected=%q error=%v", selected, errExecute)
+			}
+			if scheduler.calls != 1 {
+				t.Fatalf("scheduler calls = %d, want 1", scheduler.calls)
+			}
+		})
+	}
+}
+
 func TestManagerPluginSchedulerErrorStopsPick(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["gemini"] = schedulerTestExecutor{}

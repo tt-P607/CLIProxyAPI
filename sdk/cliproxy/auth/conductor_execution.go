@@ -204,7 +204,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 }
 
 // ExecuteForDiagnostics preserves original execution errors for trusted administrative callers.
-// Credential selection, cooldowns, and recovery limits remain unchanged.
+// Host credential eligibility, cooldowns, and recovery limits remain unchanged.
 func (m *Manager) ExecuteForDiagnostics(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return m.execute(ctx, providers, req, opts, true)
 }
