@@ -10,14 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
-	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -282,7 +281,7 @@ func TestAntigravityExecutorConversationSession(t *testing.T) {
 						t.Fatal("raw caller or conversation identity leaked into upstream body")
 					}
 				}
-				sessionID := gjson.GetBytes(captured, "request.sessionId").String()
+				sessionID := ojson.GetBytesNoCopy(captured, "request.sessionId").String()
 				want := helps.AntigravitySessionID(headers, opts.Metadata, req.Metadata)
 				if want == "" {
 					want = generateStableSessionID(captured)
@@ -355,7 +354,7 @@ func TestAntigravityBuildRequestConversationSessionPrecedence(t *testing.T) {
 				if errMarshal != nil {
 					t.Fatal(errMarshal)
 				}
-				if got := gjson.GetBytes(encoded, "request.sessionId"); got.String() != testCase.want || (testCase.want == "" && got.Exists()) {
+				if got := ojson.GetBytesNoCopy(encoded, "request.sessionId"); got.String() != testCase.want || (testCase.want == "" && got.Exists()) {
 					t.Fatalf("final sessionId = %s, want %q", got.Raw, testCase.want)
 				}
 			})
