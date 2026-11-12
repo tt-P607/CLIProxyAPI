@@ -215,6 +215,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 			if partsResult.IsArray() {
 				partResults := partsResult.Array()
+				var textContent strings.Builder
+				var reasoningContent strings.Builder
+				hasTextContent := false
+				hasReasoningContent := false
 				for i := 0; i < len(partResults); i++ {
 					partResult := partResults[i]
 					partTextResult := partResult.Get("text")
@@ -236,10 +240,14 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					}
 
 					hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-					hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+					hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+					hasContentPayload := hasTextPayload || functionCallResult.Exists() || inlineDataResult.Exists()
 
 					// Skip pure thoughtSignature parts but keep any actual payload in the same part.
 					if hasThoughtSignature && !hasContentPayload {
+						if p.ActiveToolCall[candidateIndex] != nil {
+							sawNoopFunctionCall = true
+						}
 						continue
 					}
 
@@ -256,9 +264,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						setAssistantRole()
 						// Handle text content, distinguishing between regular content and reasoning/thoughts.
 						if partResult.Get("thought").Bool() {
-							_ = templateDoc.Set("choices.0.delta.reasoning_content", text)
+							hasReasoningContent = true
+							reasoningContent.WriteString(text)
 						} else {
-							_ = templateDoc.Set("choices.0.delta.content", text)
+							hasTextContent = true
+							textContent.WriteString(text)
 						}
 					} else if functionCallResult.Exists() {
 						// Handle function call content.
@@ -386,6 +396,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						_ = templateDoc.SetRawBytes("choices.0.delta.images.-1", imageDoc.Bytes())
 					}
 				}
+				if hasTextContent {
+					_ = templateDoc.Set("choices.0.delta.content", textContent.String())
+				}
+				if hasReasoningContent {
+					_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
+				}
 			}
 
 			upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
@@ -497,7 +513,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Set finish reason.
 			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
 				finishReason := strings.ToLower(finishReasonResult.String())
-				if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
+				if strings.EqualFold(strings.TrimSpace(finishReasonResult.String()), "MAX_TOKENS") {
+					finishReason = "length"
+				} else if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
 					finishReason = "content_filter"
 				}
 				_ = choiceDoc.Set("finish_reason", finishReason)
@@ -523,12 +541,25 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					if !inlineDataResult.Exists() {
 						inlineDataResult = partResult.Get("inline_data")
 					}
+					thoughtSignatureResult := partResult.Get("thoughtSignature")
+					if !thoughtSignatureResult.Exists() {
+						thoughtSignatureResult = partResult.Get("thought_signature")
+					}
 
 					// Speech-to-text models (gemini-3.5-transcribe) deliver the
 					// transcript in an audioTranscription part instead of text.
 					audioTranscriptionResult := partResult.Get("audioTranscription")
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
+					}
+
+					hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+					hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+					hasContentPayload := hasTextPayload || functionCallResult.Exists() || inlineDataResult.Exists()
+
+					// Skip pure thoughtSignature parts but keep any actual payload in the same part.
+					if hasThoughtSignature && !hasContentPayload {
+						continue
 					}
 
 					if partTextResult.Exists() {
@@ -610,7 +641,7 @@ func resolveGeminiOpenAIFinishReason(upstreamFinishReason string, sawToolCall bo
 	case sawToolCall:
 		finishReason = "tool_calls"
 	case upstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+		finishReason = "length"
 	case isGeminiContentFilterFinishReason(upstreamFinishReason):
 		finishReason = "content_filter"
 	default:
