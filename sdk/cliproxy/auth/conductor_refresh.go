@@ -1787,7 +1787,7 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.auths))
 	for id, auth := range m.auths {
-		if auth != nil && !auth.Disabled && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
+		if auth != nil && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
 			ids = append(ids, id)
 		}
 	}

@@ -1896,10 +1896,46 @@ func TestManagerPluginSchedulerDiagnosticExecution(t *testing.T) {
 			} else if errExecute == nil || selected != "" {
 				t.Fatalf("ordinary execution escaped isolation: selected=%q error=%v", selected, errExecute)
 			}
-			if scheduler.calls != 1 {
-				t.Fatalf("scheduler calls = %d, want 1", scheduler.calls)
+			wantCalls := 1
+			if test.diagnostic {
+				wantCalls = 0
+			}
+			if scheduler.calls != wantCalls {
+				t.Fatalf("scheduler calls = %d, want %d", scheduler.calls, wantCalls)
 			}
 		})
+	}
+}
+
+func TestManagerPinnedDiagnosticsDoNotEnableCredential(t *testing.T) {
+	const provider = "antigravity"
+	const model = "disabled-diagnostic-model"
+	const authID = "disabled-diagnostic"
+	registerSchedulerModels(t, provider, model, authID)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 1)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: provider, Disabled: true, Status: StatusDisabled}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.PinnedAuthMetadataKey: authID,
+		"Diagnostic":                           true,
+		"diagnostic":                           true,
+	}, Headers: http.Header{"X-Diagnostic": {"true"}}}
+	req := cliproxyexecutor.Request{Model: model}
+	if _, errExecute := manager.Execute(context.Background(), []string{provider}, req, opts); errExecute == nil {
+		t.Fatal("ordinary pinned request or forged diagnostic enabled a disabled credential")
+	}
+	if _, errExecute := manager.ExecuteForDiagnostics(context.Background(), []string{provider}, req, opts); errExecute != nil {
+		t.Fatalf("disabled diagnostic failed: %v", errExecute)
+	}
+	current, _ := manager.GetByID(authID)
+	if current == nil || !current.Disabled || current.Status != StatusDisabled {
+		t.Fatal("diagnostic enabled the credential")
+	}
+	if _, errExecute := manager.Execute(context.Background(), []string{provider}, req, opts); errExecute == nil {
+		t.Fatal("diagnostic made the credential eligible for ordinary traffic")
 	}
 }
 

@@ -13,12 +13,13 @@ const antigravityQuotaRecoveryLimit = 3
 type antigravityQuotaRecoveryKey struct{}
 
 type antigravityQuotaRecovery struct {
-	active         bool
-	retries        int
-	failureStatus  int
-	quotaExhausted bool
-	diagnostic     bool
-	lastError      error
+	active           bool
+	retries          int
+	failureStatus    int
+	quotaExhausted   bool
+	diagnostic       bool
+	diagnosticAuthID string
+	lastError        error
 }
 
 func withAntigravityQuotaRecovery(ctx context.Context) context.Context {
@@ -29,8 +30,14 @@ func quotaRecoveryFromContext(ctx context.Context) *antigravityQuotaRecovery {
 	if ctx == nil {
 		return nil
 	}
+
 	recovery, _ := ctx.Value(antigravityQuotaRecoveryKey{}).(*antigravityQuotaRecovery)
 	return recovery
+}
+
+func isPinnedDiagnostic(ctx context.Context, authID string) bool {
+	recovery := quotaRecoveryFromContext(ctx)
+	return recovery != nil && recovery.diagnostic && recovery.diagnosticAuthID != "" && recovery.diagnosticAuthID == authID
 }
 
 func isAntigravityQuotaExhausted(provider string, err error) bool {

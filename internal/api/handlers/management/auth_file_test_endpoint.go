@@ -1,13 +1,15 @@
 package management
 
 import (
-	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -47,24 +49,49 @@ func (h *Handler) TestAuthFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
-	auth := h.findAuthForDelete(name)
-	if auth == nil {
+	auth, ok := h.lookupAuthFile(name, c.Query("auth_index"))
+	if !ok || auth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
 
 	var req testAuthFileRequest
-	_ = c.ShouldBindJSON(&req)
+	if errBind := c.ShouldBindJSON(&req); errBind != nil && !errors.Is(errBind, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid test request body"})
+		return
+	}
 	targetModel := strings.TrimSpace(req.Model)
 	if targetModel == "" {
 		targetModel = defaultTestModelForProvider(auth.Provider)
+		models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
+		if len(models) > 0 {
+			preferred := targetModel
+			targetModel = ""
+			for _, model := range models {
+				if model == nil || strings.TrimSpace(model.ID) == "" {
+					continue
+				}
+				if targetModel == "" || model.ID == preferred {
+					targetModel = model.ID
+				}
+				if model.ID == preferred {
+					break
+				}
+			}
+			if targetModel == "" {
+				targetModel = preferred
+			}
+		}
 	}
 
-	payload, _ := json.Marshal(map[string]any{
-		"model":      targetModel,
-		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		"max_tokens": 10,
-	})
+	// Codex rejects output token budgets below 16.
+	payloadDoc := ojson.NewDocString(`{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}`)
+	if errSet := payloadDoc.Set("model", targetModel); errSet != nil {
+		log.WithError(errSet).Error("failed to build credential test request")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build credential test request"})
+		return
+	}
+	payload := payloadDoc.Bytes()
 
 	startTime := time.Now()
 	resp, errExec := h.authManager.ExecuteForDiagnostics(c.Request.Context(), []string{strings.ToLower(auth.Provider)},

@@ -2870,6 +2870,31 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
+	if recovery := quotaRecoveryFromContext(ctx); recovery != nil && recovery.diagnostic && recovery.diagnosticAuthID != "" {
+		auth, ok := m.GetByID(recovery.diagnosticAuthID)
+		if !ok || auth == nil {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "diagnostic credential not found"}
+		}
+		if _, used := tried[auth.ID]; used {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "diagnostic credential already attempted"}
+		}
+		provider := canonicalSchedulingProvider(executorKeyFromAuth(auth))
+		matchesProvider := false
+		for _, allowed := range providers {
+			if canonicalSchedulingProvider(allowed) == provider {
+				matchesProvider = true
+				break
+			}
+		}
+		if !matchesProvider {
+			return nil, nil, "", &Error{Code: "provider_not_found", Message: "diagnostic credential provider mismatch"}
+		}
+		executor, okExecutor := m.Executor(provider)
+		if !okExecutor {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		return auth, executor, provider, nil
+	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 

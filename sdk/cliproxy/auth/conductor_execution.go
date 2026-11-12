@@ -204,7 +204,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 }
 
 // ExecuteForDiagnostics preserves original execution errors for trusted administrative callers.
-// Host credential eligibility, cooldowns, and recovery limits remain unchanged.
+// Pinned local diagnostics bypass scheduling availability without enabling the credential
+// or clearing its cooldowns. They never fail over to another credential.
 func (m *Manager) ExecuteForDiagnostics(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return m.execute(ctx, providers, req, opts, true)
 }
@@ -229,6 +230,9 @@ func (m *Manager) execute(ctx context.Context, providers []string, req cliproxye
 	ctx = withAntigravityQuotaRecovery(ctx)
 	quotaRecovery := quotaRecoveryFromContext(ctx)
 	quotaRecovery.diagnostic = diagnostic
+	if diagnostic {
+		quotaRecovery.diagnosticAuthID = pinnedAuthIDFromMetadata(opts.Metadata)
+	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -240,6 +244,9 @@ func (m *Manager) execute(ctx context.Context, providers []string, req cliproxye
 		roundAttempted := make(map[string]struct{})
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, attempt, defaultRequestRetry)
+		if quotaRecovery.diagnosticAuthID != "" {
+			return resp, unwrapExecutionBoundaryError(errExec)
+		}
 		if errExec == nil {
 			return resp, nil
 		}
@@ -839,6 +846,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				}
+				if isPinnedDiagnostic(execCtx, auth.ID) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {

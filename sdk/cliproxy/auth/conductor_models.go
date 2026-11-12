@@ -370,6 +370,9 @@ func (m *Manager) filterExecutionModelsForRequest(ctx context.Context, auth *Aut
 	if len(candidates) == 0 {
 		return nil
 	}
+	if auth != nil && isPinnedDiagnostic(ctx, auth.ID) {
+		return candidates
+	}
 	now := time.Now()
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {

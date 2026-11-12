@@ -1451,6 +1451,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if isPinnedDiagnostic(ctx, result.AuthID) {
+		m.recordAvailabilityNeutralResult(ctx, result)
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

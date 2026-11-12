@@ -69,6 +69,8 @@ func TestManager_ForceRefreshAll(t *testing.T) {
 	auth2 := &Auth{
 		ID:       "ag-2",
 		Provider: "antigravity",
+		Disabled: true,
+		Status:   StatusDisabled,
 		Metadata: map[string]any{"refresh_token": "ref-2"},
 	}
 	auth3NoRef := &Auth{
@@ -91,6 +93,10 @@ func TestManager_ForceRefreshAll(t *testing.T) {
 	}
 	if executor.refreshCalls.Load() != 2 {
 		t.Fatalf("expected 2 refresh calls, got %d", executor.refreshCalls.Load())
+	}
+	current, _ := manager.GetByID(auth2.ID)
+	if current == nil || !current.Disabled || current.Status != StatusDisabled {
+		t.Fatalf("disabled credential was enabled by forced refresh: %+v", current)
 	}
 }
 
