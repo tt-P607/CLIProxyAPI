@@ -5,6 +5,8 @@ package handlers
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -293,6 +295,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
 		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
+	if callerKeyFingerprint := requestCallerKeyFingerprint(ginCtx); callerKeyFingerprint != "" {
+		meta[coreexecutor.CallerKeyFingerprintMetadataKey] = callerKeyFingerprint
+	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
@@ -355,6 +360,22 @@ func requestCallerScope(ginCtx *gin.Context) string {
 		return ""
 	}
 	return coresession.CallerScope(fmt.Sprint(value))
+}
+
+func requestCallerKeyFingerprint(ginCtx *gin.Context) string {
+	if ginCtx == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("userApiKey")
+	if !exists || value == nil {
+		return ""
+	}
+	apiKey, ok := value.(string)
+	if !ok || apiKey == "" {
+		return ""
+	}
+	fingerprint := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(fingerprint[:])
 }
 
 func addCallerScopeMetadata(meta map[string]any, callerScope string) {

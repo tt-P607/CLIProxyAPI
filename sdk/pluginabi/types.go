@@ -145,6 +145,7 @@ const (
 	MethodHostAuthSave           = "host.auth.save"
 	MethodHostAuthModels         = "host.auth.models"
 	MethodHostAffinityLookup     = "host.affinity.lookup"
+	MethodHostUsageBudget        = "host.usage.budget"
 
 	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
 )

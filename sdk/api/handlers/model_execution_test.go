@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,22 @@ type modelExecutionCaptureExecutor struct {
 	lastOptions coreexecutor.Options
 	execute     func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 	stream      func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+}
+
+type modelExecutionRecordingScheduler struct {
+	requests []pluginapi.SchedulerPickRequest
+}
+
+func (s *modelExecutionRecordingScheduler) PickAuth(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	s.requests = append(s.requests, req)
+	if len(req.Candidates) == 0 {
+		return pluginapi.SchedulerPickResponse{}, false, nil
+	}
+	return pluginapi.SchedulerPickResponse{AuthID: req.Candidates[0].ID, Handled: true}, true, nil
+}
+
+func (*modelExecutionRecordingScheduler) SchedulerWantsAcrossPriorities() bool {
+	return false
 }
 
 type modelExecutionStatusHeaderError struct {
@@ -1353,5 +1371,46 @@ func TestExecuteModelReplaysInterceptedCallerScopeWithoutGinContext(t *testing.T
 	}
 	if got := replayExecOpts.Metadata[coreexecutor.DerivedSessionIDMetadataKey]; got != originalDerivedSession {
 		t.Fatalf("replay execute DerivedSessionIDMetadataKey = %v, want %q", got, originalDerivedSession)
+	}
+}
+
+func TestExecuteModelCarriesAuthenticatedCallerKeyFingerprintToPluginScheduler(t *testing.T) {
+	model := "model-execution-caller-fingerprint-scheduler"
+	executor := &modelExecutionCaptureExecutor{}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	scheduler := &modelExecutionRecordingScheduler{}
+	handler.AuthManager.SetPluginScheduler(scheduler)
+
+	const apiKey = "synthetic-authenticated-api-key"
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("userApiKey", apiKey)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	_, errMsg := handler.ExecuteModel(ctx, ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Body:          []byte(fmt.Sprintf(`{"model":%q}`, model)),
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("scheduler calls = %d, want 1", len(scheduler.requests))
+	}
+
+	got, ok := scheduler.requests[0].Options.Metadata[pluginapi.CallerKeyFingerprintMetadataKey].(string)
+	if !ok {
+		t.Fatalf("SchedulerPickRequest.Options.Metadata[%q] = %T, want string", pluginapi.CallerKeyFingerprintMetadataKey, scheduler.requests[0].Options.Metadata[pluginapi.CallerKeyFingerprintMetadataKey])
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	want := hex.EncodeToString(sum[:])
+	if got != want {
+		t.Fatalf("caller key fingerprint at plugin scheduler = %q, want %q", got, want)
+	}
+	if strings.Contains(fmt.Sprint(scheduler.requests[0].Options.Metadata), apiKey) {
+		t.Fatal("plugin scheduler metadata contains the raw caller API key")
 	}
 }

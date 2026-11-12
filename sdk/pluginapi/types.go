@@ -1233,6 +1233,9 @@ const StreamChunkHeaderInitIndex = -1
 // CallerScopeMetadataKey is the metadata key carrying the opaque downstream caller scope handle.
 const CallerScopeMetadataKey = "caller_scope"
 
+// CallerKeyFingerprintMetadataKey is the metadata key carrying the authenticated caller API key SHA-256 fingerprint.
+const CallerKeyFingerprintMetadataKey = "caller_key_fingerprint"
+
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
 	// FromFormat is the source protocol format.

@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,6 +95,85 @@ func TestRequestExecutionMetadataIncludesHashedCallerScope(t *testing.T) {
 	}
 	if got == "downstream-secret" {
 		t.Fatal("caller scope contains the raw downstream credential")
+	}
+}
+
+func TestRequestExecutionMetadataIncludesCallerKeyFingerprint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		principal  any
+		setKey     bool
+		headerKey  string
+		wantKey    string
+		wantRawKey string
+	}{
+		{
+			name:       "authenticated principal",
+			principal:  " downstream-secret ",
+			setKey:     true,
+			wantKey:    " downstream-secret ",
+			wantRawKey: " downstream-secret ",
+		},
+		{
+			name:      "unauthenticated header cannot populate fingerprint",
+			headerKey: "forged-header-secret",
+		},
+		{
+			name:       "authenticated principal overrides headers",
+			principal:  "authenticated-secret",
+			setKey:     true,
+			headerKey:  "forged-header-secret",
+			wantKey:    "authenticated-secret",
+			wantRawKey: "authenticated-secret",
+		},
+		{
+			name:      "empty principal",
+			principal: "",
+			setKey:    true,
+			headerKey: "forged-header-secret",
+		},
+		{
+			name:      "nil principal",
+			principal: nil,
+			setKey:    true,
+			headerKey: "forged-header-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tt.headerKey != "" {
+				ginCtx.Request.Header.Set("Authorization", "Bearer "+tt.headerKey)
+				ginCtx.Request.Header.Set("X-Api-Key", tt.headerKey)
+			}
+			if tt.setKey {
+				ginCtx.Set("userApiKey", tt.principal)
+			}
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+			meta := requestExecutionMetadata(ctx)
+			got, exists := meta[coreexecutor.CallerKeyFingerprintMetadataKey]
+			if tt.wantKey == "" {
+				if exists {
+					t.Fatalf("unexpected caller key fingerprint: %v", got)
+				}
+				return
+			}
+
+			sum := sha256.Sum256([]byte(tt.wantKey))
+			want := hex.EncodeToString(sum[:])
+			if got != want {
+				t.Fatalf("caller key fingerprint = %v, want %q", got, want)
+			}
+			metadataText := fmt.Sprint(meta)
+			if strings.Contains(metadataText, tt.wantRawKey) || (tt.headerKey != "" && strings.Contains(metadataText, tt.headerKey)) {
+				t.Fatal("execution metadata contains a raw caller credential")
+			}
+		})
 	}
 }
 

@@ -181,6 +181,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthSave(ctx, request)
 	case pluginabi.MethodHostAuthModels:
 		return h.callHostAuthModels(ctx, request)
+	case pluginabi.MethodHostUsageBudget:
+		return h.callHostUsageBudget(request)
 	case pluginabi.MethodHostAffinityLookup:
 		return h.callHostAffinityLookup(ctx, request)
 	case pluginabi.MethodHostRoutingResetCooldown:

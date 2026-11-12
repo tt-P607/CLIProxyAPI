@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -82,6 +83,8 @@ const (
 	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// CallerKeyFingerprintMetadataKey aliases the plugin API's authenticated caller key fingerprint metadata key.
+	CallerKeyFingerprintMetadataKey = pluginapi.CallerKeyFingerprintMetadataKey
 	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
 	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
 	// so OnResult keys the session cache identically to how selection read it.
