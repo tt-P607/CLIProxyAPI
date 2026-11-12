@@ -172,8 +172,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			}
-			if chunk.Err != nil && quotaRecoveryFromContext(ctx) != nil && (ctx == nil || ctx.Err() == nil) && isAntigravityQuotaExhausted(provider, chunk.Err) {
-				chunk.Err = newAntigravityQuotaRecoveryError()
+			if chunk.Err != nil && quotaRecoveryFromContext(ctx) != nil && (ctx == nil || ctx.Err() == nil) {
+				recovery := &antigravityQuotaRecovery{}
+				recovery.observe(provider, chunk.Err)
+				chunk.Err = recovery.publicError(chunk.Err)
 			}
 			if !forward {
 				return false

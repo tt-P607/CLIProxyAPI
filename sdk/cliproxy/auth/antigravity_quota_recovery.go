@@ -13,8 +13,12 @@ const antigravityQuotaRecoveryLimit = 3
 type antigravityQuotaRecoveryKey struct{}
 
 type antigravityQuotaRecovery struct {
-	active  bool
-	retries int
+	active         bool
+	retries        int
+	failureStatus  int
+	quotaExhausted bool
+	diagnostic     bool
+	lastError      error
 }
 
 func withAntigravityQuotaRecovery(ctx context.Context) context.Context {
@@ -64,21 +68,37 @@ func isAntigravityQuotaExhausted(provider string, err error) bool {
 }
 
 func (recovery *antigravityQuotaRecovery) observe(provider string, err error) {
-	if recovery != nil && isAntigravityQuotaExhausted(provider, err) {
+	if recovery == nil || !strings.EqualFold(provider, "antigravity") {
+		return
+	}
+	status := statusCodeFromError(err)
+	if status == http.StatusForbidden || status == http.StatusTooManyRequests {
 		recovery.active = true
+		recovery.failureStatus = status
+		recovery.quotaExhausted = isAntigravityQuotaExhausted(provider, err)
+		if recovery.diagnostic {
+			recovery.lastError = err
+		}
 	}
 }
 
 func (recovery *antigravityQuotaRecovery) observeCooldown(err error, providers []string) {
 	var cooldown *modelCooldownError
-	if !errors.As(err, &cooldown) || cooldown == nil {
-		return
+	provider := ""
+	if errors.As(err, &cooldown) && cooldown != nil {
+		provider = cooldown.provider
+	} else {
+		var unavailable *Error
+		if !errors.As(err, &unavailable) || unavailable == nil || (unavailable.Code != "auth_unavailable" && unavailable.Code != "auth_not_found") {
+			return
+		}
 	}
-	provider := cooldown.provider
 	if provider == "" && len(providers) == 1 {
 		provider = providers[0]
 	}
-	recovery.observe(provider, err)
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		recovery.observe(provider, cause)
+	}
 }
 
 func (recovery *antigravityQuotaRecovery) pending() bool {
@@ -94,7 +114,7 @@ func (recovery *antigravityQuotaRecovery) begin(ctx context.Context) error {
 		return nil
 	}
 	if recovery.exhausted() {
-		return newAntigravityQuotaRecoveryError()
+		return recovery.recoveryError()
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return errContext
@@ -105,15 +125,28 @@ func (recovery *antigravityQuotaRecovery) begin(ctx context.Context) error {
 }
 
 func newAntigravityQuotaRecoveryError() *Error {
-	return &Error{Code: "upstream_quota_exhausted", Message: "当前模型可用额度不足，自动恢复未能完成请求，请稍后重试。", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+	return &Error{Code: "upstream_quota_exhausted", Message: "当前用量已达到上游限额，请等待额度恢复后重试。", Retryable: true, HTTPStatus: http.StatusTooManyRequests}
+}
+
+func (recovery *antigravityQuotaRecovery) recoveryError() error {
+	if recovery.diagnostic && recovery.lastError != nil {
+		return recovery.lastError
+	}
+	if recovery.quotaExhausted {
+		return newAntigravityQuotaRecoveryError()
+	}
+	if recovery.failureStatus == http.StatusTooManyRequests {
+		return &Error{Code: "upstream_rate_limited", Message: "当前请求已达到上游速率限制，请稍后重试。", Retryable: true, HTTPStatus: http.StatusTooManyRequests}
+	}
+	return &Error{Code: "upstream_account_unavailable", Message: "当前模型服务暂时不可用，自动恢复未能完成请求，请稍后重试。", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 }
 
 func (recovery *antigravityQuotaRecovery) publicError(err error) error {
-	if recovery == nil || !recovery.active || err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if recovery == nil || recovery.diagnostic || !recovery.active || err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	if status := statusCodeFromError(err); status >= 400 && status < 500 && status != http.StatusTooManyRequests {
+	if status := statusCodeFromError(err); status >= 400 && status < 500 && status != http.StatusForbidden && status != http.StatusTooManyRequests {
 		return err
 	}
-	return newAntigravityQuotaRecoveryError()
+	return recovery.recoveryError()
 }

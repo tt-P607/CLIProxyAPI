@@ -155,13 +155,15 @@ Without both valid headers, existing derived-session and payload-based session b
 
 ## Antigravity Quota Recovery
 
-Local Antigravity generation treats an explicit quota-exhausted HTTP 429 separately from transient rate limits. After the first quota failure, the request has a shared budget of at most three additional execution attempts across credential failover, configured credits fallback, and existing authorization recovery. This budget takes precedence over the ordinary credential retry limit for that request; it is not multiplied by request retry rounds or streaming bootstrap retries.
+Local Antigravity generation and token counting keep upstream account rejections separate from client errors. After an upstream HTTP 403 or 429, the request has a shared budget of at most three additional execution attempts across credential failover, configured credits fallback, and existing authorization recovery. This budget takes precedence over the ordinary credential retry limit for that request; it is not multiplied by request retry rounds or streaming bootstrap retries.
 
 Recovery preserves the requested model and credential cooldowns. It does not enable paid credits automatically, reactivate disabled credentials, or repeatedly call credentials whose quota is already exhausted. When no eligible execution target remains, recovery ends before consuming the full budget.
 
-If recovery succeeds, the client receives the normal response. Otherwise, quota failures and their cached cooldown errors return HTTP 503 with a generic Chinese message identified by `upstream_quota_exhausted`, without upstream account details or headers. Caller cancellation and subsequent invalid-request errors retain their own meaning. Ordinary rate limits and other providers retain their existing behavior.
+If recovery succeeds, the client receives the normal response. Otherwise, upstream quota exhaustion and rate limits, including their cached cooldown errors, return HTTP 429 with a Chinese message identifying the upstream limit. Account permission rejections return HTTP 503. Neither response exposes upstream account details or headers. Explicit quota exhaustion uses `upstream_quota_exhausted`, other upstream rate limits use `upstream_rate_limited`, and account rejection uses `upstream_account_unavailable`. These public messages do not affect internal quota classification or credential health. Caller cancellation, subsequent invalid-request errors, and other providers retain their own meaning.
 
-Streaming recovery is limited to failures before the first payload. An exhausted-quota error after output has begun is sanitized within the stream, but the response is never replayed.
+Streaming recovery is limited to failures before the first payload. An upstream 403 or 429 after output has begun is sanitized within the stream, but the response is never replayed.
+
+Trusted administrative callers can use `Manager.ExecuteForDiagnostics` to retain original errors and status codes. The authenticated management credential test uses this entry point and identifies local model cooldowns with `error_source: "local_cooldown"`, preserving reset information and the previous upstream error. Diagnostic execution still respects pinned credentials, disabled credentials, cooldowns, and the shared recovery budget. Public API execution does not enable this behavior through request headers or metadata.
 
 ## Testing Tips
 

@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -332,11 +331,14 @@ func TestManagerExecute_ModelAliasRequestBlockedWhenTargetModelInQuotaCooldown(t
 	if errExecute == nil {
 		t.Fatal("Execute() error = nil, want cooldown error")
 	}
-	var cooldownErr *modelCooldownError
-	if !errors.As(errExecute, &cooldownErr) {
-		t.Fatalf("Execute() error = %T (%v), want *modelCooldownError", errExecute, errExecute)
+	if statusCodeFromError(errExecute) != 429 {
+		t.Fatalf("Execute() error = %T (%v), want sanitized HTTP 429", errExecute, errExecute)
 	}
-	if cooldownErr.model != requestModel {
-		t.Fatalf("cooldown model = %q, want %q", cooldownErr.model, requestModel)
+	manager.mu.RLock()
+	state := manager.auths[auth.ID].ModelStates[targetModel]
+	blocked := state.Unavailable && state.Quota.Exceeded && state.NextRetryAfter.Equal(next)
+	manager.mu.RUnlock()
+	if !blocked {
+		t.Fatal("alias request changed the target model quota cooldown")
 	}
 }

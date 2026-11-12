@@ -299,6 +299,39 @@ func TestAntigravityExecute_DoesNotUseRequestRetryForInternalRetries(t *testing.
 	}
 }
 
+func TestAntigravityExecuteStream_DoesNotRetry429OnSameCredential(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 3})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-stream-single-429",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	_, errExecute := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity})
+	if errExecute == nil {
+		t.Fatal("ExecuteStream() error = nil, want upstream 429")
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("upstream request count = %d, want 1", got)
+	}
+}
+
 func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)

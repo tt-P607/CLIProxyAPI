@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -66,7 +67,7 @@ func (h *Handler) TestAuthFile(c *gin.Context) {
 	})
 
 	startTime := time.Now()
-	resp, errExec := h.authManager.Execute(c.Request.Context(), []string{strings.ToLower(auth.Provider)},
+	resp, errExec := h.authManager.ExecuteForDiagnostics(c.Request.Context(), []string{strings.ToLower(auth.Provider)},
 		cliproxyexecutor.Request{
 			Model:   targetModel,
 			Payload: payload,
@@ -81,12 +82,25 @@ func (h *Handler) TestAuthFile(c *gin.Context) {
 
 	if errExec != nil {
 		log.WithError(errExec).WithField("auth_id", auth.ID).Debug("management TestAuthFile execution failed")
+		statusCode := 0
+		var statusProvider interface{ StatusCode() int }
+		if errors.As(errExec, &statusProvider) {
+			statusCode = statusProvider.StatusCode()
+		}
+		errorSource := "execution"
+		message := "credential test failed"
+		var cooldown interface{ IsModelCooldown() bool }
+		if errors.As(errExec, &cooldown) && cooldown.IsModelCooldown() {
+			errorSource = "local_cooldown"
+			message = "credential test not sent: selected credential is cooling down"
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"status_code": 0,
-			"latency_ms":  latencyMs,
-			"model":       targetModel,
-			"message":     "credential test failed",
-			"error":       errExec.Error(),
+			"status_code":  statusCode,
+			"latency_ms":   latencyMs,
+			"model":        targetModel,
+			"message":      message,
+			"error":        errExec.Error(),
+			"error_source": errorSource,
 		})
 		return
 	}

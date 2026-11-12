@@ -471,9 +471,9 @@ func TestManagerAntigravityQuotaRecoveryIsBoundedAndSanitized(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
-	for _, stream := range []bool{false, true} {
+	for _, mode := range []string{"execute", "diagnostic", "count", "stream"} {
 		for _, credentialLimit := range []int{0, 1} {
-			t.Run(fmt.Sprintf("stream=%v/credential_limit=%d", stream, credentialLimit), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/credential_limit=%d", mode, credentialLimit), func(t *testing.T) {
 				manager := NewManager(nil, &FillFirstSelector{}, nil)
 				manager.SetRetryConfig(8, 0, credentialLimit)
 				executor := &alwaysFailExecutor{identifier: "antigravity", fail: &Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"code":429,"message":"private upstream account quota","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`}}
@@ -488,7 +488,11 @@ func TestManagerAntigravityQuotaRecoveryIsBoundedAndSanitized(t *testing.T) {
 					}
 				}
 				var errCall error
-				if stream {
+				if mode == "diagnostic" {
+					_, errCall = manager.ExecuteForDiagnostics(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				} else if mode == "count" {
+					_, errCall = manager.ExecuteCount(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				} else if mode == "stream" {
 					var result *cliproxyexecutor.StreamResult
 					result, errCall = manager.ExecuteStream(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 					if errCall == nil && result != nil {
@@ -504,15 +508,52 @@ func TestManagerAntigravityQuotaRecoveryIsBoundedAndSanitized(t *testing.T) {
 				if executor.callCount() != 4 {
 					t.Fatalf("executor calls=%d, want initial attempt plus three recovery attempts", executor.callCount())
 				}
+				if mode == "diagnostic" {
+					if !errors.Is(errCall, executor.fail) {
+						t.Fatalf("diagnostic error=%v, want original %v", errCall, executor.fail)
+					}
+					return
+				}
 				var public *Error
-				if !errors.As(errCall, &public) || public.HTTPStatus != http.StatusServiceUnavailable || public.Code != "upstream_quota_exhausted" {
-					t.Fatalf("error=%v, want sanitized service-unavailable quota error", errCall)
+				if !errors.As(errCall, &public) || public.HTTPStatus != http.StatusTooManyRequests || public.Code != "upstream_quota_exhausted" {
+					t.Fatalf("error=%v, want sanitized usage-limit error", errCall)
 				}
 				if strings.Contains(errCall.Error(), "private upstream account quota") || strings.Contains(errCall.Error(), "QUOTA_EXHAUSTED") {
 					t.Fatalf("public error leaked upstream details: %v", errCall)
 				}
 			})
 		}
+	}
+}
+
+func TestManagerAntigravityAccountCountErrorsAreSanitized(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	for _, status := range []int{403, 429} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.SetRetryConfig(8, 0, 0)
+			executor := &alwaysFailExecutor{identifier: "antigravity", fail: &Error{HTTPStatus: status, Message: "private upstream details"}}
+			manager.RegisterExecutor(executor)
+			model := "count-account-error-" + uuid.NewString()
+			authID := model + "-auth"
+			registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: executor.Identifier()}); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				_, errCount := manager.ExecuteCount(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				wantStatus := http.StatusTooManyRequests
+				if status == http.StatusForbidden {
+					wantStatus = http.StatusServiceUnavailable
+				}
+				if statusCodeFromError(errCount) != wantStatus || strings.Contains(errCount.Error(), "private") || executor.callCount() != 1 {
+					t.Fatalf("count error=%v calls=%d, want sanitized %d without retrying unavailable account", errCount, executor.callCount(), wantStatus)
+				}
+			}
+		})
 	}
 }
 
@@ -523,6 +564,7 @@ func TestManagerAntigravityQuotaRecoveryOutcomes(t *testing.T) {
 	quotaErr := &Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"code":429,"details":[{"reason":"QUOTA_EXHAUSTED"}],"message":"private quota details"}}`}
 	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid input"}
 	rateErr := &Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"code":429,"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`}
+	forbiddenErr := &Error{HTTPStatus: http.StatusForbidden, Message: "private forbidden account details"}
 	for _, mode := range []string{"execute", "stream", "bootstrap"} {
 		for _, test := range []struct {
 			name         string
@@ -533,18 +575,21 @@ func TestManagerAntigravityQuotaRecoveryOutcomes(t *testing.T) {
 			wantStatus   int
 			wantOriginal error
 			credits      bool
+			cached       bool
 		}{
 			{name: "first_recovery_succeeds", failures: []error{quotaErr}, accounts: 6, wantCalls: 2},
 			{name: "third_recovery_succeeds", failures: []error{quotaErr, quotaErr, quotaErr}, accounts: 6, wantCalls: 4},
-			{name: "no_healthy_credential", failures: []error{quotaErr}, accounts: 1, wantCalls: 1, wantStatus: 503},
-			{name: "bootstrap_budget", failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 6, wantCalls: 4, wantStatus: 503},
+			{name: "no_healthy_credential", failures: []error{quotaErr}, accounts: 1, wantCalls: 1, wantStatus: 429, cached: true},
+			{name: "forbidden_no_healthy_credential", failures: []error{forbiddenErr}, accounts: 1, wantCalls: 1, wantStatus: 503, cached: true},
+			{name: "forbidden_recovers", failures: []error{forbiddenErr}, accounts: 2, wantCalls: 2},
+			{name: "bootstrap_budget", failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 6, wantCalls: 4, wantStatus: 429},
 			{name: "invalid_request_kept", failures: []error{quotaErr, invalidErr}, accounts: 6, wantCalls: 2, wantStatus: 400, wantOriginal: invalidErr},
 			{name: "cancellation_kept", failures: []error{quotaErr, context.Canceled}, accounts: 2, wantCalls: 2, wantOriginal: context.Canceled},
-			{name: "rate_limit_unchanged", failures: []error{rateErr}, accounts: 1, wantCalls: 1, wantStatus: 429, wantOriginal: rateErr},
+			{name: "rate_limit_sanitized", failures: []error{rateErr}, accounts: 1, wantCalls: 1, wantStatus: 429, cached: true},
 			{name: "other_provider_unchanged", provider: "codex", failures: []error{quotaErr}, accounts: 1, wantCalls: 1, wantStatus: 429, wantOriginal: quotaErr},
-			{name: "credits_fallback_budget", credits: true, failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 6, wantCalls: 4, wantStatus: 503},
+			{name: "credits_fallback_budget", credits: true, failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 6, wantCalls: 4, wantStatus: 429},
 			{name: "credits_fallback_recovers", credits: true, failures: []error{quotaErr}, accounts: 1, wantCalls: 2},
-			{name: "failed_credits_candidate_not_repeated", credits: true, failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 1, wantCalls: 2, wantStatus: 503},
+			{name: "failed_credits_candidate_not_repeated", credits: true, failures: []error{quotaErr, quotaErr, quotaErr, quotaErr, quotaErr}, accounts: 1, wantCalls: 2, wantStatus: 429},
 		} {
 			t.Run(mode+"/"+test.name, func(t *testing.T) {
 				provider := test.provider
@@ -605,17 +650,17 @@ func TestManagerAntigravityQuotaRecoveryOutcomes(t *testing.T) {
 				if test.wantStatus == 0 && test.wantOriginal == nil && errCall != nil {
 					t.Fatalf("recovery failed: %v", errCall)
 				}
-				if test.wantStatus == 503 && strings.Contains(errCall.Error(), "private quota details") {
+				if test.wantOriginal == nil && test.wantStatus != 0 && strings.Contains(errCall.Error(), "private") {
 					t.Fatalf("upstream details leaked: %v", errCall)
 				}
-				if test.name == "no_healthy_credential" {
+				if test.cached {
 					var nextErr error
 					if mode == "execute" {
 						_, nextErr = manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 					} else {
 						_, nextErr = manager.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 					}
-					if statusCodeFromError(nextErr) != 503 || strings.Contains(nextErr.Error(), "private quota details") || len(executor.attemptedAuthIDs()) != 1 {
+					if statusCodeFromError(nextErr) != test.wantStatus || strings.Contains(nextErr.Error(), "private") || len(executor.attemptedAuthIDs()) != 1 {
 						t.Fatalf("cached quota cooldown leaked or retried: %v", nextErr)
 					}
 				}
@@ -632,30 +677,42 @@ func TestManagerAntigravityQuotaRecoveryOutcomes(t *testing.T) {
 }
 
 func TestManagerAntigravityQuotaRecoveryDoesNotReplayDeliveredStream(t *testing.T) {
-	manager := NewManager(nil, nil, nil)
-	manager.SetRetryConfig(8, 0, 0)
-	quotaErr := &Error{HTTPStatus: 429, Message: `{"error":{"code":429,"details":[{"reason":"QUOTA_EXHAUSTED"}],"message":"private account"}}`}
-	executor := &affinityRetryExecutor{identifier: "antigravity", outcomes: []affinityRetryOutcome{{chunks: []cliproxyexecutor.StreamChunk{{Payload: []byte("already delivered")}, {Err: quotaErr}}}}}
-	manager.RegisterExecutor(executor)
-	model := "quota-stream-tail-" + uuid.NewString()
-	registry.GetGlobalRegistry().RegisterClient(model, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(model) })
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: model, Provider: executor.Identifier()}); errRegister != nil {
-		t.Fatal(errRegister)
-	}
-	result, errStream := manager.ExecuteStream(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errStream != nil {
-		t.Fatal(errStream)
-	}
-	var chunks []cliproxyexecutor.StreamChunk
-	for chunk := range result.Chunks {
-		chunks = append(chunks, chunk)
-	}
-	if len(chunks) != 2 || string(chunks[0].Payload) != "already delivered" || statusCodeFromError(chunks[1].Err) != 503 || strings.Contains(chunks[1].Err.Error(), "private account") {
-		t.Fatalf("unexpected delivered stream: %+v", chunks)
-	}
-	if len(executor.attemptedAuthIDs()) != 1 {
-		t.Fatal("stream replayed after the first payload")
+	for _, failure := range []*Error{
+		{HTTPStatus: 429, Message: `{"error":{"code":429,"details":[{"reason":"QUOTA_EXHAUSTED"}],"message":"private account"}}`},
+		{HTTPStatus: 429, Message: `{"error":{"code":429,"details":[{"reason":"RATE_LIMIT_EXCEEDED"}],"message":"private account"}}`},
+		{HTTPStatus: 403, Message: "private account"},
+	} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(8, 0, 0)
+			quotaErr := failure
+			executor := &affinityRetryExecutor{identifier: "antigravity", outcomes: []affinityRetryOutcome{{chunks: []cliproxyexecutor.StreamChunk{{Payload: []byte("already delivered")}, {Err: quotaErr}}}}}
+			manager.RegisterExecutor(executor)
+			model := "quota-stream-tail-" + uuid.NewString()
+			registry.GetGlobalRegistry().RegisterClient(model, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(model) })
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: model, Provider: executor.Identifier()}); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			result, errStream := manager.ExecuteStream(context.Background(), []string{executor.Identifier()}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if errStream != nil {
+				t.Fatal(errStream)
+			}
+			var chunks []cliproxyexecutor.StreamChunk
+			for chunk := range result.Chunks {
+				chunks = append(chunks, chunk)
+			}
+			wantStatus := http.StatusTooManyRequests
+			if failure.HTTPStatus == http.StatusForbidden {
+				wantStatus = http.StatusServiceUnavailable
+			}
+			if len(chunks) != 2 || string(chunks[0].Payload) != "already delivered" || statusCodeFromError(chunks[1].Err) != wantStatus || strings.Contains(chunks[1].Err.Error(), "private account") {
+				t.Fatalf("unexpected delivered stream: %+v", chunks)
+			}
+			if len(executor.attemptedAuthIDs()) != 1 {
+				t.Fatal("stream replayed after the first payload")
+			}
+		})
 	}
 }
 

@@ -125,6 +125,16 @@ func isOpenAIImageExecutionOptions(opts cliproxyexecutor.Options) bool {
 }
 
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return m.execute(ctx, providers, req, opts, false)
+}
+
+// ExecuteForDiagnostics preserves original execution errors for trusted administrative callers.
+// Credential selection, cooldowns, and recovery limits remain unchanged.
+func (m *Manager) ExecuteForDiagnostics(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return m.execute(ctx, providers, req, opts, true)
+}
+
+func (m *Manager) execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, diagnostic bool) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
@@ -139,6 +149,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	ctx = withAntigravityQuotaRecovery(ctx)
 	quotaRecovery := quotaRecoveryFromContext(ctx)
+	quotaRecovery.diagnostic = diagnostic
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -205,6 +216,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
+	ctx = withAntigravityQuotaRecovery(ctx)
+	quotaRecovery := quotaRecoveryFromContext(ctx)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -218,13 +231,17 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
+		quotaRecovery.observeCooldown(errExec, normalized)
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
+			return cliproxyexecutor.Response{}, quotaRecovery.publicError(unwrapExecutionBoundaryError(errExec))
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
+		if quotaRecovery.exhausted() {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -240,7 +257,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			}
 		}
 		lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
-		return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(lastErr)
+		return cliproxyexecutor.Response{}, quotaRecovery.publicError(unwrapExecutionBoundaryError(lastErr))
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -552,7 +569,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	quotaRecovery := quotaRecoveryFromContext(ctx)
 	for {
 		if quotaRecovery.exhausted() {
-			return cliproxyexecutor.Response{}, newAntigravityQuotaRecoveryError()
+			return cliproxyexecutor.Response{}, quotaRecovery.recoveryError()
 		}
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !quotaRecovery.pending() {
 			if lastErr != nil {
@@ -778,8 +795,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	quotaRecovery := quotaRecoveryFromContext(ctx)
 	for {
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if quotaRecovery.exhausted() {
+			return cliproxyexecutor.Response{}, quotaRecovery.recoveryError()
+		}
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !quotaRecovery.pending() {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
@@ -873,11 +894,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			if errBudget := quotaRecovery.begin(execCtx); errBudget != nil {
+				return cliproxyexecutor.Response{}, errBudget
+			}
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
+			quotaRecovery.observe(provider, errExec)
 			if errExec != nil {
 				if hasUpstreamExecutionAttempt(errExec) {
 					upstreamErr = errExec
@@ -889,6 +914,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
+					if errBudget := quotaRecovery.begin(execCtx); errBudget != nil {
+						return cliproxyexecutor.Response{}, errBudget
+					}
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
@@ -896,6 +924,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
+					quotaRecovery.observe(provider, errExec)
 					if errExec != nil {
 						if hasUpstreamExecutionAttempt(errExec) {
 							upstreamErr = errExec
@@ -1010,7 +1039,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	quotaRecovery := quotaRecoveryFromContext(ctx)
 	for {
 		if quotaRecovery.exhausted() {
-			return nil, newAntigravityQuotaRecoveryError()
+			return nil, quotaRecovery.recoveryError()
 		}
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry && !quotaRecovery.pending() {

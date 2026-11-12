@@ -244,9 +244,10 @@ func TestCompletionsHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testi
 }
 
 type quotaRecoveryHTTPExecutor struct {
-	mu     sync.Mutex
-	calls  []string
-	stages []string
+	mu      sync.Mutex
+	calls   []string
+	stages  []string
+	failure error
 }
 
 func (*quotaRecoveryHTTPExecutor) Identifier() string { return "antigravity" }
@@ -256,6 +257,9 @@ func (e *quotaRecoveryHTTPExecutor) Execute(_ context.Context, auth *coreauth.Au
 	e.calls = append(e.calls, auth.ID)
 	e.stages = append(e.stages, "execute")
 	e.mu.Unlock()
+	if e.failure != nil {
+		return coreexecutor.Response{}, e.failure
+	}
 	return coreexecutor.Response{}, antigravityQuotaRecoveryHTTPError()
 }
 
@@ -265,7 +269,11 @@ func (e *quotaRecoveryHTTPExecutor) ExecuteStream(_ context.Context, auth *corea
 	e.stages = append(e.stages, "bootstrap")
 	e.mu.Unlock()
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Err: antigravityQuotaRecoveryHTTPError()}
+	failure := e.failure
+	if failure == nil {
+		failure = antigravityQuotaRecoveryHTTPError()
+	}
+	chunks <- coreexecutor.StreamChunk{Err: failure}
 	close(chunks)
 	return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Account": {"private-account-marker"}}, Chunks: chunks}, nil
 }
@@ -292,83 +300,101 @@ func antigravityQuotaRecoveryHTTPError() error {
 func TestOpenAIHandlersQuotaRecoveryIsBoundedAndSanitized(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	for _, endpoint := range []string{"chat", "responses"} {
-		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, stream), func(t *testing.T) {
-				executor := &quotaRecoveryHTTPExecutor{}
-				manager := coreauth.NewManager(nil, nil, nil)
-				manager.SetRetryConfig(8, 0, 0)
-				manager.RegisterExecutor(executor)
+	for _, accountFailure := range []struct {
+		name    string
+		status  int
+		reason  string
+		code    string
+		message string
+	}{
+		{name: "quota", status: 429, reason: "QUOTA_EXHAUSTED", code: "upstream_quota_exhausted", message: "当前用量已达到上游限额，请等待额度恢复后重试。"},
+		{name: "forbidden", status: 403, reason: "ACCOUNT_REJECTED", code: "upstream_account_unavailable", message: "当前模型服务暂时不可用，自动恢复未能完成请求，请稍后重试。"},
+		{name: "rate_limit", status: 429, reason: "RATE_LIMIT_EXCEEDED", code: "upstream_rate_limited", message: "当前请求已达到上游速率限制，请稍后重试。"},
+		{name: "unknown_429", status: 429, code: "upstream_rate_limited", message: "当前请求已达到上游速率限制，请稍后重试。"},
+	} {
+		for _, endpoint := range []string{"chat", "responses"} {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%v", accountFailure.name, endpoint, stream), func(t *testing.T) {
+					executor := &quotaRecoveryHTTPExecutor{failure: &coreauth.Error{HTTPStatus: accountFailure.status, Message: fmt.Sprintf(`{"error":{"code":%d,"message":"private-account-marker","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":%q}]}}`, accountFailure.status, accountFailure.reason)}}
+					manager := coreauth.NewManager(nil, nil, nil)
+					manager.SetRetryConfig(8, 0, 0)
+					manager.RegisterExecutor(executor)
 
-				model := fmt.Sprintf("antigravity-quota-recovery-%s-%v", endpoint, stream)
-				for index := 0; index < 6; index++ {
-					authID := fmt.Sprintf("%s-auth-%d", model, index)
-					registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
-					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
-					if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}); errRegister != nil {
-						t.Fatalf("register auth: %v", errRegister)
-					}
-				}
-
-				body := fmt.Sprintf(`{"model":%q,"stream":%v`, model, stream)
-				if endpoint == "chat" {
-					body += `,"messages":[{"role":"user","content":"hi"}]}`
-				} else {
-					body += `,"input":"hi"}`
-				}
-
-				base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-					Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 5},
-				}, manager)
-				router := gin.New()
-				if endpoint == "chat" {
-					router.POST("/v1/chat/completions", NewOpenAIAPIHandler(base).ChatCompletions)
-				} else {
-					router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
-				}
-
-				path := "/v1/chat/completions"
-				if endpoint == "responses" {
-					path = "/v1/responses"
-				}
-				request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-				request.Header.Set("Content-Type", "application/json")
-				recorder := httptest.NewRecorder()
-				router.ServeHTTP(recorder, request)
-
-				responseBody := recorder.Body.String()
-				if recorder.Code != http.StatusServiceUnavailable {
-					t.Fatalf("status = %d, want 503; body=%q", recorder.Code, responseBody)
-				}
-				if !strings.Contains(responseBody, "upstream_quota_exhausted") {
-					t.Fatalf("response lacks sanitized quota error code: %q", responseBody)
-				}
-				if !strings.Contains(responseBody, "当前模型可用额度不足，自动恢复未能完成请求，请稍后重试。") {
-					t.Fatalf("response lacks the safe quota recovery message: %q", responseBody)
-				}
-				if strings.Contains(responseBody, "private-account-marker") || strings.Contains(responseBody, "QUOTA_EXHAUSTED") {
-					t.Fatalf("response leaked upstream quota details: %q", responseBody)
-				}
-				if recorder.Header().Get("Retry-After") != "" || recorder.Header().Get("X-Goog-Request-Info") != "" || recorder.Header().Get("X-Upstream-Account") != "" {
-					t.Fatalf("response forwarded upstream headers: %v", recorder.Header())
-				}
-
-				executor.mu.Lock()
-				calls := len(executor.calls)
-				stages := append([]string(nil), executor.stages...)
-				executor.mu.Unlock()
-				if calls != 4 {
-					t.Fatalf("executor calls = %d, want initial attempt plus three recovery attempts; stages=%v", calls, stages)
-				}
-				if stream {
-					for _, stage := range stages {
-						if stage != "bootstrap" {
-							t.Fatalf("stream request used unexpected executor stage %q; stages=%v", stage, stages)
+					model := fmt.Sprintf("antigravity-quota-recovery-%s-%v", endpoint, stream)
+					for index := 0; index < 6; index++ {
+						authID := fmt.Sprintf("%s-auth-%d", model, index)
+						registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+						t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+						if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}); errRegister != nil {
+							t.Fatalf("register auth: %v", errRegister)
 						}
 					}
-				}
-			})
+
+					body := fmt.Sprintf(`{"model":%q,"stream":%v`, model, stream)
+					if endpoint == "chat" {
+						body += `,"messages":[{"role":"user","content":"hi"}]}`
+					} else {
+						body += `,"input":"hi"}`
+					}
+
+					base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+						Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 5},
+					}, manager)
+					router := gin.New()
+					if endpoint == "chat" {
+						router.POST("/v1/chat/completions", NewOpenAIAPIHandler(base).ChatCompletions)
+					} else {
+						router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
+					}
+
+					path := "/v1/chat/completions"
+					if endpoint == "responses" {
+						path = "/v1/responses"
+					}
+					request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+					request.Header.Set("Content-Type", "application/json")
+					recorder := httptest.NewRecorder()
+					router.ServeHTTP(recorder, request)
+
+					responseBody := recorder.Body.String()
+					wantStatus := http.StatusTooManyRequests
+					if accountFailure.status == http.StatusForbidden {
+						wantStatus = http.StatusServiceUnavailable
+					}
+					if recorder.Code != wantStatus {
+						t.Fatalf("status = %d, want %d; body=%q", recorder.Code, wantStatus, responseBody)
+					}
+					if !strings.Contains(responseBody, accountFailure.code) {
+						t.Fatalf("response lacks sanitized quota error code: %q", responseBody)
+					}
+					if !strings.Contains(responseBody, accountFailure.message) {
+						t.Fatalf("response lacks the safe quota recovery message: %q", responseBody)
+					}
+					if strings.Contains(responseBody, "private-account-marker") || strings.Contains(responseBody, "QUOTA_EXHAUSTED") {
+						t.Fatalf("response leaked upstream quota details: %q", responseBody)
+					}
+					if recorder.Header().Get("Retry-After") != "" || recorder.Header().Get("X-Goog-Request-Info") != "" || recorder.Header().Get("X-Upstream-Account") != "" {
+						t.Fatalf("response forwarded upstream headers: %v", recorder.Header())
+					}
+
+					executor.mu.Lock()
+					calls := len(executor.calls)
+					stages := append([]string(nil), executor.stages...)
+					executor.mu.Unlock()
+					if calls != 4 {
+						t.Fatalf("executor calls = %d, want initial attempt plus three recovery attempts; stages=%v", calls, stages)
+					}
+					if stream {
+						for _, stage := range stages {
+							if stage != "bootstrap" {
+								t.Fatalf("stream request used unexpected executor stage %q; stages=%v", stage, stages)
+							}
+						}
+					}
+				})
+			}
 		}
+	}
 }
 
 func TestChatCompletionsHandlerRecordsAPIResponseErrorOnInitialEmbeddedErrorChunk(t *testing.T) {
