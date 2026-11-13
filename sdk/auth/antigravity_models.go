@@ -36,11 +36,13 @@ const (
 	AntigravityProbeStatusTransientError
 )
 
-// AntigravityModelCapabilityHints holds normalized per-account model IDs and web-search capability IDs.
+// AntigravityModelCapabilityHints holds normalized per-account model IDs and capability flags.
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
 	ModelIDs map[string]struct{}
+	// Nil means disabled flags are unknown; an empty non-nil set means none are disabled.
+	DisabledModelIDs map[string]struct{}
 }
 
 // Clone returns a deep copy of the capability hints.
@@ -48,6 +50,7 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		DisabledModelIDs:  maps.Clone(h.DisabledModelIDs),
 	}
 }
 
@@ -189,6 +192,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 
 	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
+	var disabledModelIDs map[string]struct{}
 	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
 		if !modelsResult.IsObject() {
 			return AntigravityModelCapabilityHints{}, false
@@ -198,9 +202,23 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 			return AntigravityModelCapabilityHints{}, false
 		}
 		modelIDs = make(map[string]struct{}, len(modelMap))
-		for id := range modelMap {
+		disabledModelIDs = make(map[string]struct{})
+		for id, model := range modelMap {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
+				if model.IsObject() {
+					disabled := model.Get("disabled")
+					if disabled.Exists() {
+						if disabled.Type != ojson.True && disabled.Type != ojson.False {
+							disabledModelIDs = nil
+						} else if disabled.Bool() && disabledModelIDs != nil {
+							disabledModelIDs[normalized] = struct{}{}
+						}
+					}
+				} else {
+					// Preserve the catalog while leaving disabled flags unknown for legacy-shaped entries.
+					disabledModelIDs = nil
+				}
 			}
 		}
 	}
@@ -208,6 +226,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: webSearchModels,
 		ModelIDs:          modelIDs,
+		DisabledModelIDs:  disabledModelIDs,
 	}, true
 }
 
@@ -230,6 +249,20 @@ func BuildPersistedAntigravityCapabilityHints(project, endpoint string, hints An
 	}
 	value := map[string]any{
 		"model_ids": modelItems,
+	}
+	if hints.DisabledModelIDs != nil {
+		disabledModelIDs := make([]string, 0, len(hints.DisabledModelIDs))
+		for id := range hints.DisabledModelIDs {
+			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
+				disabledModelIDs = append(disabledModelIDs, normalized)
+			}
+		}
+		slices.Sort(disabledModelIDs)
+		disabledItems := make([]any, len(disabledModelIDs))
+		for i, id := range disabledModelIDs {
+			disabledItems[i] = id
+		}
+		value["disabled_model_ids"] = disabledItems
 	}
 	if project = strings.TrimSpace(project); project != "" {
 		value["project_id"] = project
@@ -293,9 +326,18 @@ func ParsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 		}
 		webSearchModels = parsedWebSearch
 	}
+	var disabledModelIDs map[string]struct{}
+	if rawDisabled, hasDisabled := rawMap["disabled_model_ids"]; hasDisabled && rawDisabled != nil {
+		parsedDisabled, okDisabled := parsePersistedAntigravityModelSet(rawDisabled)
+		if !okDisabled {
+			return AntigravityModelCapabilityHints{}, false
+		}
+		disabledModelIDs = parsedDisabled
+	}
 	return AntigravityModelCapabilityHints{
 		ModelIDs:          modelIDs,
 		WebSearchModelIDs: webSearchModels,
+		DisabledModelIDs:  disabledModelIDs,
 	}, true
 }
 

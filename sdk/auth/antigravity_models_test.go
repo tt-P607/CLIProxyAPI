@@ -30,7 +30,7 @@ func TestNormalizeAntigravityModelID(t *testing.T) {
 
 func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 	t.Run("valid payload with models and web search", func(t *testing.T) {
-		body := []byte(`{"models":{"gemini-3-flash":{"displayName":"Gemini 3 Flash"},"claude-sonnet-5-5-medium":{"displayName":"Claude Sonnet 5.5"}},"webSearchModelIds":["gemini-3-flash"]}`)
+		body := []byte(`{"models":{"gemini-3-flash":{"displayName":"Gemini 3 Flash","disabled":true},"claude-sonnet-5-5-medium":{"displayName":"Claude Sonnet 5.5","disabled":false}},"webSearchModelIds":["gemini-3-flash"]}`)
 		hints, ok := ParseAntigravityModelCapabilityHints(body)
 		if !ok {
 			t.Fatal("expected ok to be true")
@@ -50,6 +50,12 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 		if _, exists := hints.WebSearchModelIDs["gemini-3-flash"]; !exists {
 			t.Errorf("missing gemini-3-flash in WebSearchModelIDs")
 		}
+		if hints.DisabledModelIDs == nil || len(hints.DisabledModelIDs) != 1 {
+			t.Fatalf("disabled model set = %v, want one disabled model", hints.DisabledModelIDs)
+		}
+		if _, exists := hints.DisabledModelIDs["gemini-3-flash"]; !exists {
+			t.Errorf("missing disabled gemini-3-flash in DisabledModelIDs")
+		}
 	})
 
 	t.Run("empty catalog is authoritative empty", func(t *testing.T) {
@@ -64,6 +70,9 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 		if len(hints.ModelIDs) != 0 {
 			t.Errorf("expected 0 models, got %d", len(hints.ModelIDs))
 		}
+		if hints.DisabledModelIDs == nil || len(hints.DisabledModelIDs) != 0 {
+			t.Errorf("disabled model flags should be known and empty, got %v", hints.DisabledModelIDs)
+		}
 	})
 
 	t.Run("missing models field leaves ModelIDs nil", func(t *testing.T) {
@@ -74,6 +83,9 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 		}
 		if hints.ModelIDs != nil {
 			t.Fatal("expected nil ModelIDs for unknown catalog")
+		}
+		if hints.DisabledModelIDs != nil {
+			t.Fatal("expected nil DisabledModelIDs for unknown catalog")
 		}
 		if len(hints.WebSearchModelIDs) != 1 {
 			t.Errorf("got %d webSearchModelIds, want 1", len(hints.WebSearchModelIDs))
@@ -88,7 +100,7 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 	})
 
 	t.Run("clones model IDs out of caller buffer", func(t *testing.T) {
-		buf := []byte(`{"models":{"gemini-3-flash":{}},"webSearchModelIds":["gemini-3-flash"]}`)
+		buf := []byte(`{"models":{"gemini-3-flash":{"disabled":true}},"webSearchModelIds":["gemini-3-flash"]}`)
 		hints, ok := ParseAntigravityModelCapabilityHints(buf)
 		if !ok {
 			t.Fatal("expected ok to be true")
@@ -102,6 +114,24 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 		if _, exists := hints.WebSearchModelIDs["gemini-3-flash"]; !exists {
 			t.Fatal("expected gemini-3-flash in WebSearchModelIDs after buffer mutation")
 		}
+		if _, exists := hints.DisabledModelIDs["gemini-3-flash"]; !exists {
+			t.Fatal("expected gemini-3-flash in DisabledModelIDs after buffer mutation")
+		}
+	})
+
+	t.Run("non-boolean disabled flag leaves flags unknown", func(t *testing.T) {
+		for _, body := range []string{
+			`{"models":{"gemini-3-flash":{"disabled":"true"}}}`,
+			`{"models":{"gemini-3-flash":{"disabled":null}}}`,
+		} {
+			hints, ok := ParseAntigravityModelCapabilityHints([]byte(body))
+			if !ok || hints.ModelIDs == nil {
+				t.Fatal("expected a valid model catalog")
+			}
+			if hints.DisabledModelIDs != nil {
+				t.Fatalf("invalid disabled flag should stay unknown, got %v", hints.DisabledModelIDs)
+			}
+		}
 	})
 }
 
@@ -113,6 +143,9 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 		},
 		WebSearchModelIDs: map[string]struct{}{
 			"gemini-3-flash": {},
+		},
+		DisabledModelIDs: map[string]struct{}{
+			"gemini-4-argon": {},
 		},
 	}
 	project := "aicode-consumers"
@@ -138,6 +171,12 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 	if len(parsed.WebSearchModelIDs) != 1 {
 		t.Errorf("got %d web search models, want 1", len(parsed.WebSearchModelIDs))
 	}
+	if parsed.DisabledModelIDs == nil || len(parsed.DisabledModelIDs) != 1 {
+		t.Fatalf("disabled model IDs = %v, want one disabled model", parsed.DisabledModelIDs)
+	}
+	if _, exists := parsed.DisabledModelIDs["gemini-4-argon"]; !exists {
+		t.Fatal("disabled model ID was not preserved")
+	}
 
 	// Mismatched project
 	if _, okMismatch := ParsePersistedAntigravityCapabilityHints(metadata, "other-project", expectedEndpoint); okMismatch {
@@ -152,6 +191,22 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 	// Nil ModelIDs (unknown catalog) must not serialize as authoritative empty catalog
 	if gotNil := BuildPersistedAntigravityCapabilityHints(project, expectedEndpoint, AntigravityModelCapabilityHints{}); gotNil != nil {
 		t.Errorf("expected nil persisted hints for unknown catalog, got %v", gotNil)
+	}
+
+	legacy := map[string]any{
+		AntigravityPersistedHintsMetaKey: map[string]any{
+			"project_id": project,
+			"endpoint":   expectedEndpoint,
+			"model_ids":  []string{"legacy-model"},
+		},
+	}
+	legacyHints, ok := ParsePersistedAntigravityCapabilityHints(legacy, project, expectedEndpoint)
+	if !ok || legacyHints.DisabledModelIDs != nil {
+		t.Fatalf("legacy disabled flags should remain unknown: hints=%+v ok=%v", legacyHints, ok)
+	}
+	legacyPersisted := BuildPersistedAntigravityCapabilityHints(project, expectedEndpoint, legacyHints)
+	if _, exists := legacyPersisted["disabled_model_ids"]; exists {
+		t.Fatal("legacy unknown flags must not be persisted as a known empty set")
 	}
 }
 

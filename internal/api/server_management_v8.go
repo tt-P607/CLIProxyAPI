@@ -47,6 +47,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
+	v8.GET("/credentials/model-catalogs", s.mgmt.GetCredentialModelCatalogs)
 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)
 	v8.DELETE("/credentials", s.mgmt.DeleteAuthFileV8)
 	v8.GET("/credentials/models", s.mgmt.GetAuthFileModels)

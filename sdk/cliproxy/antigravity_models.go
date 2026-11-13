@@ -86,19 +86,14 @@ type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
 	ModelIDs map[string]struct{}
-	revision uint64
+	// Nil means disabled flags are unknown; an empty non-nil set means none are disabled.
+	DisabledModelIDs map[string]struct{}
+	revision         uint64
 }
 
 func (s *Service) authModelCatalog(auth *coreauth.Auth) ([]string, bool) {
-	if auth == nil || auth.Provider != "antigravity" {
-		return nil, false
-	}
-	hints := s.cachedAntigravityHints(auth)
-	if hints.ModelIDs == nil && auth.Disabled {
-		project, _ := auth.Metadata["project_id"].(string)
-		hints, _ = parsePersistedAntigravityCapabilityHints(auth.Metadata, project, antigravityModelBaseURLs(auth)[0])
-	}
-	if hints.ModelIDs == nil {
+	hints, known := s.authModelCatalogHints(auth)
+	if !known {
 		return nil, false
 	}
 	models := make([]string, 0, len(hints.ModelIDs))
@@ -109,8 +104,28 @@ func (s *Service) authModelCatalog(auth *coreauth.Auth) ([]string, bool) {
 	return models, true
 }
 
+func (s *Service) authModelCatalogHints(auth *coreauth.Auth) (antigravityModelCapabilityHints, bool) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		return antigravityModelCapabilityHints{}, false
+	}
+	hints := s.cachedAntigravityHints(auth)
+	if hints.ModelIDs == nil && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+		project, _ := auth.Metadata["project_id"].(string)
+		hints, _ = parsePersistedAntigravityCapabilityHints(auth.Metadata, project, antigravityModelBaseURLs(auth)[0])
+	}
+	if hints.ModelIDs == nil {
+		return antigravityModelCapabilityHints{}, false
+	}
+	return hints, true
+}
+
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
-	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
+	return antigravityModelCapabilityHints{
+		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
+		ModelIDs:          maps.Clone(h.ModelIDs),
+		DisabledModelIDs:  maps.Clone(h.DisabledModelIDs),
+		revision:          h.revision,
+	}
 }
 
 // antigravityCapabilityKey isolates catalogs by account, project, route and client
@@ -240,6 +255,7 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	return sdkauth.BuildPersistedAntigravityCapabilityHints(project, endpoint, sdkauth.AntigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		DisabledModelIDs:  hints.DisabledModelIDs,
 	})
 }
 
@@ -251,6 +267,7 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		DisabledModelIDs:  hints.DisabledModelIDs,
 	}, true
 }
 
@@ -391,6 +408,7 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		DisabledModelIDs:  hints.DisabledModelIDs,
 	}, status
 }
 
@@ -459,6 +477,7 @@ func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabili
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		DisabledModelIDs:  hints.DisabledModelIDs,
 	}, true
 }
 

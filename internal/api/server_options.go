@@ -24,6 +24,7 @@ type serverOptionConfig struct {
 	keepAliveOnTimeout    func()
 	postAuthHook          auth.PostAuthHook
 	postAuthPersistHook   auth.PostAuthHook
+	modelCatalogResolver  func(*auth.Auth) (string, []string, map[string]struct{})
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
 	exampleAPIKeySafeMode bool
@@ -111,6 +112,13 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 func WithPostAuthPersistHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthPersistHook = hook
+	}
+}
+
+// WithCredentialModelCatalogResolver injects a read-only per-credential model catalog lookup.
+func WithCredentialModelCatalogResolver(resolver func(*auth.Auth) (string, []string, map[string]struct{})) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.modelCatalogResolver = resolver
 	}
 }
 

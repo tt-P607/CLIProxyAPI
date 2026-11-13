@@ -141,6 +141,7 @@ retain the corresponding business operation's fields.
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
+| `/credentials/model-catalogs` | GET | Get each credential's read-only model catalog and its source. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
 | `/credentials/status` | PATCH | Change credential status. |
@@ -159,6 +160,50 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store (supports optional `?refresh=true` to bypass cached release checks). |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Credential model catalogs
+
+`GET /v8/management/credentials/model-catalogs` uses the normal management-key
+authentication. It returns one entry per credential, including disabled credentials,
+in deterministic order. Each catalog entry contains only `name`, `auth_index`,
+`provider`, `source`, and `models`; `name` is the credential file name or, when
+absent, its ID.
+The `auth_index` uses the same identity as the credential list. Model IDs are also
+sorted, and both `catalogs` and each `models` value are JSON arrays, including when
+empty.
+
+```json
+{
+  "catalogs": [
+    {
+      "name": "account.json",
+      "auth_index": "<auth-index>",
+      "provider": "antigravity",
+      "source": "upstream",
+      "models": [
+        { "id": "model-a", "disabled": false },
+        { "id": "model-b", "disabled": true }
+      ]
+    }
+  ]
+}
+```
+
+`source` is `upstream` for a known authoritative per-account catalog (currently
+Antigravity), `registered` for nonempty runtime-registered models where the provider
+has no per-account directory, and `unknown` when no catalog is known. `registered`
+does not claim upstream permission. A known empty Antigravity catalog is returned as
+`source: "upstream"` with `models: []`; an unknown catalog is `source: "unknown"`
+with `models: []`. Upstream entries use native account model IDs; registered entries
+use runtime model IDs. Unknown Antigravity catalogs are not filled from static or
+runtime models.
+
+This endpoint is read-only: it does not contact upstream services, fetch or refresh
+credentials, or enable accounts. For Antigravity, it uses the per-account catalog
+already cached or persisted by the runtime. The model-level `disabled` field is
+included only when disabled flags are known from a recorded refresh. Older persisted
+catalogs that contain only model IDs omit `disabled` rather than implying `false`;
+the field is not inferred from a model ID suffix.
 
 ## OAuth
 
